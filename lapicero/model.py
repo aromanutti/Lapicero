@@ -22,6 +22,8 @@ class Stroke:
     points: tuple[tuple[float, float], ...]
     color: str = "#202020"
     width: float = 3.0
+    # Optional pen pressure (0..1) per point; None draws the whole stroke at `width`.
+    pressures: tuple[float, ...] | None = None
 
     def __post_init__(self):
         if not self.points or any(
@@ -38,9 +40,30 @@ class Stroke:
         if not _number(self.width) or self.width <= 0:
             raise NoteFormatError("Stroke width must be positive and finite")
         object.__setattr__(self, "points", tuple((float(x), float(y)) for x, y in self.points))
+        if self.pressures is not None:
+            if (not isinstance(self.pressures, (list, tuple)) or len(self.pressures) != len(self.points)
+                    or not all(_number(p) and 0 <= p <= 1 for p in self.pressures)):
+                raise NoteFormatError("Stroke pressures must be one 0..1 value per point")
+            object.__setattr__(self, "pressures", tuple(float(p) for p in self.pressures))
 
     def to_data(self):
-        return {"points": [list(p) for p in self.points], "color": self.color, "width": self.width}
+        data = {"points": [list(p) for p in self.points], "color": self.color, "width": self.width}
+        if self.pressures is not None:
+            data["pressures"] = list(self.pressures)
+        return data
+
+    def with_points(self, points):
+        """Same ink (color, width, pressure) along moved or transformed points."""
+        return Stroke(tuple(points), self.color, self.width, self.pressures)
+
+
+# Pressure scales the chosen width: light touch is thinner, a firm press slightly bolder.
+MIN_PRESSURE_FACTOR = .3
+PRESSURE_GAIN = .9
+
+
+def pressure_width(width, pressure):
+    return width * (MIN_PRESSURE_FACTOR + PRESSURE_GAIN * pressure)
 
 
 IMAGE_KEY = re.compile(r"[0-9a-f]{64}\.png")

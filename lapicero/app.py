@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QFormLayout, QFrame,
                                QGraphicsOpacityEffect, QGridLayout, QGroupBox, QHBoxLayout,
@@ -33,6 +33,9 @@ MAX_WIDTH = 40
 TOOLBAR_SIZES = {"small": 26, "medium": 34, "large": 44}  # Icon pixels, in cycle order.
 DRAWING_OPACITY = .25  # Toolbar fades while the pen is down, so ink below stays visible.
 UI_SETTINGS = "ui.json"  # Window preferences beside the library file.
+# Save once the pen has rested this long: writing a whole library after every
+# stroke froze the app between letters. Close and Ctrl+S still save at once.
+AUTOSAVE_DELAY_MS = 1200
 SHORTCUTS = ("P pen · E eraser · L lasso · S shapes · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
              "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom · F11 fullscreen")
 
@@ -69,8 +72,13 @@ class PenPreset:
 
 
 class LapiceroWindow(QMainWindow):
-    def __init__(self, library_path=None):
+    def __init__(self, library_path=None, autosave_delay_ms=AUTOSAVE_DELAY_MS):
         super().__init__()
+        self._unsaved = False
+        self._autosave_delay = autosave_delay_ms
+        self._autosave = QTimer(self)
+        self._autosave.setSingleShot(True)
+        self._autosave.timeout.connect(self._autosave_now)
         path = Path(library_path) if library_path is not None else Path.home() / "Documents" / "Lapicero" / "library.json"
         self._save_error_shown = False
         try:
@@ -257,6 +265,7 @@ class LapiceroWindow(QMainWindow):
         self.active_preset = preset
         self.pen_buttons[self.presets.index(preset)].setChecked(True)
         self.canvas.set_mode("pen")
+        self.canvas.pressure_enabled = not preset.highlighter
         self.canvas.set_pen_color(preset.ink)
         self.width_slider.setValue(preset.width)
         self.canvas.set_pen_width(preset.width)
@@ -426,7 +435,8 @@ class LapiceroWindow(QMainWindow):
         self._title()
 
     def _title(self):
-        self.setWindowTitle(f"{'*' if self.library.dirty else ''}Lapicero — {self.library.path}")
+        # A flag, not Library.dirty: comparing the whole library on every stroke is slow.
+        self.setWindowTitle(f"{'*' if self._unsaved else ''}Lapicero — {self.library.path}")
 
     def _report_error(self, title, exc):
         # Report once per failing save streak; status remains visible until retry succeeds.
@@ -438,6 +448,7 @@ class LapiceroWindow(QMainWindow):
                              "#b73535")
 
     def save(self):
+        self._autosave.stop()
         try:
             self.library.path.parent.mkdir(parents=True, exist_ok=True)
             self.library.save()
@@ -446,6 +457,7 @@ class LapiceroWindow(QMainWindow):
             self._title()
             return False
         self._save_error_shown = False
+        self._unsaved = False
         self._set_status("Saved", f"All changes saved to {self.library.path}")
         self._title()
         return True
@@ -457,8 +469,19 @@ class LapiceroWindow(QMainWindow):
         self._place_toolbar()
 
     def _changed(self):
+        self._unsaved = True
+        if self._autosave_delay <= 0:
+            self.save()
+            return
+        self._set_status("Saving…", "Changes are saved when you pause writing")
         self._title()
-        self.save()
+        self._autosave.start(self._autosave_delay)
+
+    def _autosave_now(self):
+        if self.canvas.gesture_active:
+            self._autosave.start(self._autosave_delay)  # Never stall a stroke in progress.
+        else:
+            self.save()
 
     def _name(self, title, initial=""):
         value, accepted = QInputDialog.getText(self, title, "Name:", text=initial)
@@ -542,6 +565,8 @@ class LapiceroWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.canvas.finalize_current_gesture()
+        if self._autosave.isActive():
+            self.save()  # Flush the pending autosave; a failure falls through to the prompt.
         if not self.library.dirty:
             event.accept()
             return

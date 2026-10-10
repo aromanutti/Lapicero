@@ -81,11 +81,14 @@ def _strokes(entries):
         raise LibraryFormatError("Strokes must be a list")
     strokes = []
     for entry in entries:
-        _fields(entry, ("points", "color", "width"))
-        if not isinstance(entry["points"], list):
-            raise LibraryFormatError("Stroke points must be a list")
+        if isinstance(entry, dict) and "pressures" not in entry:
+            entry = {**entry, "pressures": None}
+        _fields(entry, ("points", "color", "width", "pressures"))
+        if not isinstance(entry["points"], list) or entry["pressures"] is not None and not isinstance(
+                entry["pressures"], list):
+            raise LibraryFormatError("Stroke points and pressures must be lists")
         try:
-            strokes.append(Stroke(entry["points"], entry["color"], entry["width"]))
+            strokes.append(Stroke(entry["points"], entry["color"], entry["width"], entry["pressures"]))
         except NoteFormatError as exc:
             raise LibraryFormatError(str(exc)) from exc
     return strokes
@@ -307,6 +310,35 @@ class Library:
         library._owned_bytes = contents
         return library
 
+    def _validate(self):
+        """Check the live tree without re-creating every stroke.
+
+        Strokes and pictures validate themselves when constructed and are
+        immutable, so only their types need checking here; this keeps the
+        autosave cost low for large libraries.
+        """
+        seen = set()
+
+        def identity(item):
+            if not isinstance(item.id, str) or not item.id or item.id in seen:
+                raise LibraryFormatError("Invalid or duplicate library ID")
+            seen.add(item.id)
+            if not isinstance(item.name, str) or not item.name.strip() or item.name != item.name.strip():
+                raise LibraryFormatError("Names must be non-empty text without surrounding whitespace")
+
+        for subject in self.subjects:
+            identity(subject)
+            for section in subject.sections:
+                identity(section)
+                for page in section.pages:
+                    identity(page)
+                    if page.paper not in PAPERS:
+                        raise LibraryFormatError("Unknown paper type")
+                    if not all(isinstance(stroke, Stroke) for stroke in page.note.strokes):
+                        raise LibraryFormatError("Invalid stroke in page")
+                    if not all(isinstance(image, PlacedImage) for image in page.note.images):
+                        raise LibraryFormatError("Invalid image in page")
+
     def _check_target(self, target):
         if self._owned_path == target.absolute() and self._owned_bytes is not None:
             try:
@@ -332,8 +364,8 @@ class Library:
         target = Path(path) if path is not None else self.path
         if target is None:
             raise ValueError("Choose a library path first")
+        self._validate()  # Reject invalid direct mutations before writing anything.
         data = self._data()
-        _parse(data)  # Reject malformed trees or invalid direct mutations before writing.
         contents = json.dumps(data, allow_nan=False).encode("utf-8")
         self._check_target(target)
         temporary = None

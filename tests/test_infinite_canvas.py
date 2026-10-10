@@ -1,7 +1,8 @@
 """Infinite viewport, paper, lasso selection and shape tool contracts."""
+import math
 
 import pytest
-from PySide6.QtCore import QPointF, Qt, QEvent
+from PySide6.QtCore import QPointF, QRectF, Qt, QEvent
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
@@ -515,3 +516,205 @@ def test_nearest_handle_wins_on_thin_selections(canvas):
     canvas.selection = [line]
     for name in ("e", "w", "n", "s"):
         assert canvas._handle_at(canvas.selection_handles()[name]) == name
+
+
+class PenSample:
+    """QTabletEvent stand-in that reports pen pressure."""
+
+    def __init__(self, kind, x, y, pressure):
+        self.kind, self.point, self.value, self.accepted = kind, QPointF(x, y), pressure, False
+
+    def type(self):
+        return {"press": QEvent.Type.TabletPress, "move": QEvent.Type.TabletMove,
+                "release": QEvent.Type.TabletRelease}[self.kind]
+
+    def position(self):
+        return self.point
+
+    def pressure(self):
+        return self.value
+
+    def accept(self):
+        self.accepted = True
+
+
+def pen_stroke(canvas, samples):
+    for index, (x, y, pressure) in enumerate(samples):
+        kind = "press" if index == 0 else "release" if index == len(samples) - 1 else "move"
+        canvas.tabletEvent(PenSample(kind, x, y, pressure))
+
+
+def ink_height(image, x):
+    return sum(image.pixelColor(x, y).red() < 128 for y in range(image.height()))
+
+
+def test_tablet_pen_records_pressure_and_draws_thicker_when_pressing_harder(canvas):
+    canvas.set_paper("plain")
+    canvas.set_pen_width(8)
+    pen_stroke(canvas, [(50 + 10 * i, 100, 0.1) for i in range(11)]
+               + [(170 + 10 * i, 100, 1.0) for i in range(12)])
+    stroke = canvas.note.strokes[0]
+    assert stroke.pressures is not None and len(stroke.pressures) == len(stroke.points)
+    assert stroke.pressures[0] == pytest.approx(0.1) and stroke.pressures[-1] == pytest.approx(1.0)
+    image = render(canvas)
+    assert ink_height(image, 250) > ink_height(image, 80) + 4
+
+
+def test_mouse_highlighter_and_snapped_shapes_keep_uniform_width(canvas):
+    drag(canvas, (20, 20), (80, 40))
+    assert canvas.note.strokes[-1].pressures is None
+    canvas.pressure_enabled = False
+    pen_stroke(canvas, [(20, 60, .9), (60, 70, .9), (90, 60, .9)])
+    assert canvas.note.strokes[-1].pressures is None
+    canvas.pressure_enabled = True
+    canvas.set_mode("shape")
+    pen_stroke(canvas, [(20, 100, .9), (120, 160, .9)])
+    assert canvas.note.strokes[-1].pressures is None
+
+
+def test_pressure_survives_move_transform_and_copy_paste(canvas):
+    pressed = Stroke(((50, 50), (60, 60), (70, 50)), "#202020", 3, (0.2, 0.6, 1.0))
+    canvas.set_note(Note(strokes=[pressed]))
+    canvas.set_mode("select")
+    canvas.selection = [pressed]
+    press_drag(canvas, (60, 55), (80, 75))
+    assert canvas.note.strokes[0].pressures == pressed.pressures
+    x, y = canvas.selection_handles()["e"]
+    press_drag(canvas, (x, y), (x + 20, y))
+    assert canvas.note.strokes[0].pressures == pressed.pressures
+    assert canvas.copy_selection() and canvas.paste()
+    assert canvas.note.strokes[1].pressures == pressed.pressures
+
+
+def test_pressure_dot_and_eraser_hits_variable_width_stroke(canvas):
+    canvas.set_paper("plain")
+    pen_stroke(canvas, [(100, 100, 1.0), (100, 100, 1.0)])
+    assert canvas.note.strokes[0].pressures == (1.0,)
+    assert render(canvas).pixelColor(100, 100).red() < 128
+    canvas.set_mode("eraser")
+    pen_stroke(canvas, [(90, 100, .5), (110, 100, .5)])  # Mouse input is muted right after the pen.
+    assert canvas.note.strokes == []
+
+
+def test_pressure_samples_build_incrementally_like_the_whole_stroke():
+    from lapicero.qt_canvas import pressure_samples
+    points = [(i * 7.0, (i % 3) * 5.0) for i in range(12)]
+    pressures = [(i % 5) / 4 for i in range(12)]
+    whole = pressure_samples(points, pressures, 6, 1, len(points) - 1)
+    pieces = pressure_samples(points, pressures, 6, 1, 4)[:] + pressure_samples(points, pressures, 6, 5, 11)[1:]
+    assert pieces == whole
+
+
+def test_live_pressure_ink_matches_committed_ink(canvas):
+    canvas.set_paper("plain")
+    samples = [(40 + 6 * i, 120 + 25 * ((i % 8) - 4) ** 2 / 16, (i % 7) / 6) for i in range(40)]
+    for index, (x, y, pressure) in enumerate(samples[:-1]):
+        canvas.tabletEvent(PenSample("press" if index == 0 else "move", x, y, pressure))
+    live = render(canvas)
+    canvas.tabletEvent(PenSample("release", *samples[-2][:2], samples[-2][2]))
+    committed = render(canvas)
+    differing = sum(live.pixelColor(x, y) != committed.pixelColor(x, y)
+                    for x in range(0, 320, 2) for y in range(60, 200, 2))
+    assert differing <= 6
+
+
+def test_nan_pressure_reuses_previous_value(canvas):
+    pen_stroke(canvas, [(10, 10, .4), (20, 20, float("nan")), (30, 10, .8)])
+    assert canvas.note.strokes[0].pressures == (0.4, 0.4, 0.8)
+
+
+def sentence(n=12):
+    return [Stroke([(100 + i * 14 + 6 * math.sin(k / 3), 150 + 10 * math.cos(k / 4)) for k in range(30)],
+                   "#205bb5", 3, [.3 + .5 * abs(math.sin(k / 7)) for k in range(30)]) for i in range(n)]
+
+
+@pytest.mark.parametrize("handle", [None, "e", "rotate"])
+def test_dragging_a_selection_reuses_cached_ink(canvas, monkeypatch, handle):
+    import lapicero.qt_canvas as qc
+    words = sentence()
+    canvas.set_note(Note(strokes=words))
+    canvas.set_paper("plain")
+    canvas.set_mode("select")
+    canvas.selection = list(words)
+    render(canvas)
+    calls = []
+    original = qc.pressure_outline
+    monkeypatch.setattr(qc, "pressure_outline", lambda s: (calls.append(1), original(s))[1])
+    if handle is None:
+        center = canvas._geometry(words).center()
+        start = (center.x(), center.y())
+    else:
+        start = canvas.selection_handles()[handle]
+    mouse(canvas, "press", *start)
+    for step in range(1, 15):
+        mouse(canvas, "move", start[0] + step * 3, start[1] + step)
+        render(canvas)
+    assert calls == []  # No outline is rebuilt while dragging, scaling included.
+    during = render(canvas)
+    mouse(canvas, "release", start[0] + 42, start[1] + 14)
+    after = render(canvas)
+    if handle != "e":  # Rigid moves preview exactly; stretching previews scaled pressure ink.
+        blue = lambda image, x, y: image.pixelColor(x, y).blue() - image.pixelColor(x, y).red() > 60
+        differing = sum(blue(during, x, y) != blue(after, x, y)
+                        for x in range(40, 400, 2) for y in range(60, 260, 2))
+        assert differing <= 40  # Only antialiased ink edges may differ (frame and handles ignored).
+    assert len(canvas.note.strokes) == len(words) and canvas.selection == canvas.note.strokes
+
+
+def ink_mask(image, test):
+    return {(x, y) for x in range(0, image.width(), 2) for y in range(0, image.height(), 2)
+            if test(image.pixelColor(x, y))}
+
+
+def test_stretching_rotated_picture_previews_what_is_committed(stored):
+    from PySide6.QtWidgets import QApplication as App
+    App.clipboard().setImage(solid_image(200, 60))
+    stored.paste()
+    base = stored.note.images[0]
+    rotated = PlacedImage(base.key, 150, 150, 200, 60, 30)
+    stored.set_note(Note(images=[rotated]))
+    stored.set_mode("select")
+    stored.selection = [rotated]
+    red = lambda c: c.red() > 200 and c.green() < 80
+    x, y = stored.selection_handles()["e"]
+    mouse(stored, "press", x, y)
+    mouse(stored, "move", x + 150, y)
+    previewed = list(stored._drag_rebuilt.values())
+    during = ink_mask(render(stored), red)
+    mouse(stored, "release", x + 150, y)
+    after = ink_mask(render(stored), red)
+    assert previewed == stored.note.images  # The preview is the committed picture.
+    assert len(during ^ after) <= 80  # Only the dashed frame crossing the picture differs.
+
+
+def test_scaling_pressure_ink_previews_its_real_thickness(canvas):
+    pressed = Stroke([(100 + k * 4, 150 + 20 * math.sin(k / 5)) for k in range(30)], "#205bb5", 12,
+                     [.5] * 30)
+    canvas.set_note(Note(strokes=[pressed]))
+    canvas.set_paper("plain")
+    canvas.set_mode("select")
+    canvas.selection = [pressed]
+    blue = lambda c: c.blue() - c.red() > 60
+    x, y = canvas.selection_handles()["se"]
+    mouse(canvas, "press", x, y)
+    mouse(canvas, "move", x + 120, y + 90)
+    during = ink_mask(render(canvas), blue)
+    mouse(canvas, "release", x + 120, y + 90)
+    after = ink_mask(render(canvas), blue)
+    assert len(during ^ after) <= 40
+
+
+def test_drag_release_repaints_where_the_selection_lands(stored, monkeypatch):
+    rotated = PlacedImage("b" * 64 + ".png", 150, 150, 200, 60, 30)
+    stored.set_note(Note(images=[rotated]))
+    stored.set_mode("select")
+    stored.selection = [rotated]
+    areas = []
+    original = stored._update_area
+    monkeypatch.setattr(stored, "_update_area", lambda rect: (areas.append(QRectF(rect)), original(rect))[1])
+    x, y = stored.selection_handles()["e"]
+    mouse(stored, "press", x, y)
+    mouse(stored, "move", x + 150, y)
+    mouse(stored, "release", x + 150, y)
+    landed = stored._item_rect(stored.note.images[0])
+    assert areas and areas[-1].contains(landed)

@@ -204,3 +204,13 @@ def test_placed_image_angle_is_normalized_and_validated():
     assert PlacedImage(KEY, 0, 0, 1, 1, 90).to_data()["angle"] == 90
     with pytest.raises(NoteFormatError):
         PlacedImage(KEY, 0, 0, 1, 1, float("inf"))
+
+
+def test_stroke_pressures_are_optional_validated_and_serialized_only_when_present():
+    plain = Stroke(((0, 0), (5, 5)))
+    assert plain.pressures is None and "pressures" not in plain.to_data()
+    pressed = Stroke(((0, 0), (5, 5)), "#202020", 3, (0.2, 1))
+    assert pressed.pressures == (0.2, 1.0) and pressed.to_data()["pressures"] == [0.2, 1.0]
+    for bad in ((0.5,), (0.5, 1.5), (0.5, -0.1), (0.5, float("nan")), (0.5, "1")):
+        with pytest.raises(NoteFormatError):
+            Stroke(((0, 0), (5, 5)), "#202020", 3, bad)

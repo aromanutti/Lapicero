@@ -19,10 +19,11 @@ def qt():
 
 @pytest.fixture
 def window(qt, tmp_path):
-    widget = LapiceroWindow(library_path=tmp_path / "folder" / "library.json")
+    widget = LapiceroWindow(library_path=tmp_path / "folder" / "library.json", autosave_delay_ms=0)
     widget.show()
     qt.processEvents()
     yield widget
+    # Immediate autosave keeps assertions synchronous; debounced saving has its own tests.
     # Tests explicitly resolve dirty work; cleanup must never trigger a modal dialog.
     widget.library._saved = widget.library._data()
     widget.close()
@@ -298,7 +299,7 @@ def test_corrupt_or_unowned_file_never_replaced(qt, tmp_path, monkeypatch):
     path.write_text("corrupt", encoding="utf-8")
     errors = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *a: errors.append(a))
-    window = LapiceroWindow(library_path=path)
+    window = LapiceroWindow(library_path=path, autosave_delay_ms=0)
     names(monkeypatch, "Keep in memory")
     window.new_subject()
     assert path.read_text(encoding="utf-8") == "corrupt"
@@ -341,7 +342,7 @@ def test_existing_standalone_note_not_overwritten(qt, tmp_path, monkeypatch):
     path.write_text(json.dumps({"version": 1, "strokes": []}), encoding="utf-8")
     before = path.read_bytes()
     monkeypatch.setattr(QMessageBox, "warning", lambda *a: None)
-    window = LapiceroWindow(library_path=path)
+    window = LapiceroWindow(library_path=path, autosave_delay_ms=0)
     names(monkeypatch, "A subject")
     window.new_subject()
     assert window.library.dirty and path.read_bytes() == before
@@ -481,3 +482,89 @@ def test_toolbar_fades_while_drawing(window, monkeypatch):
 
 def test_paper_setting_disabled_without_page(window):
     assert not window.paper_combo.isEnabled() and window.size_combo.isEnabled()
+
+
+def test_pressure_only_for_pens_not_highlighters(window, monkeypatch):
+    populate(window, monkeypatch)
+    assert window.canvas.pressure_enabled
+    window.pen_buttons[4].click()
+    assert not window.canvas.pressure_enabled
+    window.pen_buttons[1].click()
+    assert window.canvas.pressure_enabled
+
+
+@pytest.fixture
+def debounced(qt, tmp_path):
+    widget = LapiceroWindow(library_path=tmp_path / "library.json", autosave_delay_ms=150)
+    widget.show()
+    qt.processEvents()
+    yield widget
+    widget.library._saved = widget.library._data()
+    widget._autosave.stop()
+    widget.close()
+
+
+def press(window, kind, x, y):
+    from PySide6.QtCore import QPointF, QEvent
+    from PySide6.QtGui import QMouseEvent
+    event_type = {"press": QEvent.Type.MouseButtonPress, "move": QEvent.Type.MouseMove,
+                  "release": QEvent.Type.MouseButtonRelease}[kind]
+    point = QPointF(x, y)
+    event = QMouseEvent(event_type, point, point, point,
+                        Qt.MouseButton.NoButton if kind == "move" else Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.NoButton if kind == "release" else Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier)
+    getattr(window.canvas, "mouse" + kind.title() + "Event")(event)
+
+
+def saved_strokes(window, page):
+    return len(Library.load(window.library.path).page(page.id).note.strokes)
+
+
+def test_ink_autosaves_after_a_pause_not_on_every_stroke(debounced, monkeypatch):
+    _, _, page = populate(debounced, monkeypatch)
+    tap(debounced, 40, 300)
+    tap(debounced, 60, 300)
+    assert len(page.note.strokes) == 2 and saved_strokes(debounced, page) == 0
+    assert debounced.status.text() == "Saving…" and debounced.windowTitle().startswith("*")
+    QTest.qWait(400)
+    assert saved_strokes(debounced, page) == 2 and not debounced.library.dirty
+    assert debounced.status.text() == "Saved" and not debounced.windowTitle().startswith("*")
+
+
+def test_autosave_waits_while_pen_is_down(debounced, monkeypatch):
+    _, _, page = populate(debounced, monkeypatch)
+    tap(debounced, 40, 300)
+    press(debounced, "press", 80, 300)
+    QTest.qWait(400)
+    assert saved_strokes(debounced, page) == 0
+    press(debounced, "move", 120, 320)
+    press(debounced, "release", 120, 320)
+    QTest.qWait(400)
+    assert saved_strokes(debounced, page) == 2
+
+
+def test_close_and_ctrl_s_flush_pending_autosave_without_prompt(debounced, monkeypatch, qt):
+    _, _, page = populate(debounced, monkeypatch)
+    tap(debounced, 40, 300)
+    debounced.canvas.setFocus()
+    QTest.keyClick(debounced.canvas, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+    assert saved_strokes(debounced, page) == 1 and not debounced._autosave.isActive()
+    tap(debounced, 60, 300)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: pytest.fail("close must not prompt"))
+    assert debounced.close()
+    assert saved_strokes(debounced, page) == 2
+
+
+def test_save_rejects_invalid_direct_mutations_without_writing(window, monkeypatch):
+    _, _, page = populate(window, monkeypatch)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    before = window.library.path.read_bytes()
+    page.paper = "dots"
+    assert not window.save() and window.library.path.read_bytes() == before
+    page.paper = "grid"
+    page.note.strokes.append("not a stroke")
+    assert not window.save() and window.library.path.read_bytes() == before
+    page.note.strokes.pop()
+    page.name = "  padded  "
+    assert not window.save() and window.library.path.read_bytes() == before

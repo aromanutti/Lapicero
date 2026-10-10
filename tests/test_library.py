@@ -315,3 +315,24 @@ def test_picture_angle_persists_and_is_optional(tmp_path):
     entries = raw["subjects"][0]["sections"][0]["pages"][0]["images"]
     assert entries[0]["angle"] == 90 and "angle" not in entries[1]
     assert [i.angle for i in Library.load(library.path).page(page.id).note.images] == [90, 0]
+
+
+def test_stroke_pressures_round_trip_and_stay_optional(tmp_path):
+    library = Library(path=tmp_path / "library.json")
+    subject = library.create_subject("S")
+    section = library.create_section(subject.id, "T")
+    page = library.create_page(section.id, "P")
+    page.note.add_stroke(Stroke(((0, 0), (5, 5)), "#202020", 3, (0.25, 0.75)))
+    page.note.add_stroke(Stroke(((9, 9), (5, 5))))
+    library.save()
+    raw = json.loads(library.path.read_text(encoding="utf-8"))
+    entries = raw["subjects"][0]["sections"][0]["pages"][0]["strokes"]
+    assert entries[0]["pressures"] == [0.25, 0.75] and "pressures" not in entries[1]
+    strokes = Library.load(library.path).page(page.id).note.strokes
+    assert [s.pressures for s in strokes] == [(0.25, 0.75), None]
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"version":1,"subjects":[{"id":"s","name":"S","sections":[{"id":"t","name":"T",'
+                   '"pages":[{"id":"p","name":"P","strokes":[{"points":[[0,0],[1,1]],"color":"#000000",'
+                   '"width":3,"pressures":[0.5]}]}]}]}]}', encoding="utf-8")
+    with pytest.raises(LibraryFormatError):
+        Library.load(bad)

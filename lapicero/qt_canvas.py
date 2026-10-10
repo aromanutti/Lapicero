@@ -10,11 +10,11 @@ import time
 
 from PySide6.QtCore import (QBuffer, QIODevice, QMimeData, QPointF, QRectF, Qt, QEvent,
                             QTimer, Signal)
-from PySide6.QtGui import (QColor, QImage, QPainter, QPainterPath, QPainterPathStroker, QPen,
+from PySide6.QtGui import (QColor, QImage, QPainter, QPainterPath, QPainterPathStroker, QPen, QTransform,
                            QPixmap, QPointingDevice, QPolygonF)
 from PySide6.QtWidgets import QApplication, QGridLayout, QScrollBar, QWidget
 
-from .model import Note, NoteFormatError, PlacedImage, Stroke
+from .model import Note, NoteFormatError, PlacedImage, Stroke, pressure_width
 from .shapes import SHAPE_KINDS, normalize_shape, shape_points
 
 
@@ -40,6 +40,103 @@ HANDLE_CURSORS = {"nw": Qt.CursorShape.SizeFDiagCursor, "se": Qt.CursorShape.Siz
                   "rotate": Qt.CursorShape.PointingHandCursor}
 PLACEHOLDER_COLOR = "#e6e6e6"
 SELECTION_COLOR = "#2f7de1"
+
+
+def _signed_area(points):
+    return sum(ax * by - bx * ay for (ax, ay), (bx, by) in zip(points, points[1:] + points[:1])) / 2
+
+
+def _ellipse_orientation():
+    probe = QPainterPath()
+    probe.addEllipse(QPointF(0, 0), 1, 1)
+    points = [(probe.elementAt(i).x, probe.elementAt(i).y) for i in range(probe.elementCount())]
+    return 1 if _signed_area(points) >= 0 else -1
+
+
+ELLIPSE_ORIENTATION = _ellipse_orientation()
+
+
+def pressure_samples(points, pressures, width, first, last):
+    """Discs (center, radius) along the smoothed curve of InkCanvas._path.
+
+    Segment i (1-based) runs from the midpoint before points[i] to the one after
+    it, with points[i] as control. Returns the start of segment `first` plus two
+    samples per segment up to `last`, so consecutive ranges join seamlessly.
+    """
+    radius = lambda p: pressure_width(width, p) / 2
+    n = len(points)
+
+    def boundary(i):  # Start of segment i (= end of segment i - 1).
+        if i <= 1:
+            return points[0], pressures[0]
+        if i >= n:
+            return points[-1], pressures[-1]
+        return (((points[i - 1][0] + points[i][0]) / 2, (points[i - 1][1] + points[i][1]) / 2),
+                (pressures[i - 1] + pressures[i]) / 2)
+
+    start, start_p = boundary(first)
+    samples = [(start, radius(start_p))]
+    for i in range(first, last + 1):
+        control, control_p = points[i], pressures[i]
+        end, end_p = boundary(i + 1)
+        for t in (.5, 1.0):
+            a, b, c = (1 - t) ** 2, 2 * t * (1 - t), t * t
+            samples.append(((a * start[0] + b * control[0] + c * end[0],
+                             a * start[1] + b * control[1] + c * end[1]),
+                            radius(a * start_p + b * control_p + c * end_p)))
+        start, start_p = end, end_p
+    return samples
+
+
+def new_outline_path():
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.WindingFill)
+    return path
+
+
+def add_outline(path, samples, first_disc=True):
+    """Add round discs at samples joined by tangent hulls.
+
+    All pieces share one orientation so the nonzero fill never cancels overlaps.
+    """
+    for (a, ra), (b, rb) in zip(samples, samples[1:]):
+        d = math.dist(a, b)
+        if d <= abs(ra - rb) or d == 0:
+            continue  # One disc contains the other; the discs cover it.
+        theta = math.atan2(b[1] - a[1], b[0] - a[0])
+        phi = math.acos((ra - rb) / d)
+        hull = [(a[0] + ra * math.cos(theta + phi), a[1] + ra * math.sin(theta + phi)),
+                (b[0] + rb * math.cos(theta + phi), b[1] + rb * math.sin(theta + phi)),
+                (b[0] + rb * math.cos(theta - phi), b[1] + rb * math.sin(theta - phi)),
+                (a[0] + ra * math.cos(theta - phi), a[1] + ra * math.sin(theta - phi))]
+        if (1 if _signed_area(hull) >= 0 else -1) != ELLIPSE_ORIENTATION:
+            hull.reverse()
+        path.addPolygon(QPolygonF([QPointF(*q) for q in hull]))
+        path.closeSubpath()
+    for center, r in samples if first_disc else samples[1:]:
+        path.addEllipse(QPointF(*center), r, r)
+    return path
+
+
+def pressure_outline(stroke):
+    """Filled outline of a pressure stroke along the smoothed curve of InkCanvas._path."""
+    points = stroke.points
+    return add_outline(new_outline_path(),
+                       pressure_samples(points, stroke.pressures, stroke.width, 1, len(points) - 1))
+
+
+def clamp_pressure(pressure):
+    """0..1 tablet pressure, or None for missing or non-finite readings."""
+    if pressure is None or not math.isfinite(pressure):
+        return None
+    return max(0.0, min(1.0, pressure))
+
+
+def ink_width(stroke):
+    """Widest painted width of a stroke, including pressure."""
+    if stroke.pressures is None:
+        return stroke.width
+    return pressure_width(stroke.width, max(stroke.pressures))
 
 
 def qcolor(color):
@@ -89,6 +186,9 @@ class InkCanvas(QWidget):
         self._ox = self._oy = 0.0
         self._gesture = None  # Mode of the gesture in progress.
         self._points = None
+        self._pressures = None  # Pen pressure per point, for tablet pen strokes.
+        self._live = None  # Outline cache of the stroke being drawn (see _live_outline).
+        self.pressure_enabled = True  # Pens use pressure; highlighters turn it off.
         self._ink_color = None
         self._ink_width = None
         self._snapped = None
@@ -101,10 +201,20 @@ class InkCanvas(QWidget):
         self._shape_end = None
         self._pan_from = None
         self._cache = {}
+        self._centerlines = {}  # Halo paths of pressure strokes (see _centerline).
         self._paste_count = 0
         self._handle = None  # Grabbed selection handle (see HANDLES, or "rotate").
-        self._preview = None  # Transformed copies of the selection while dragging.
+        # While dragging a selection, its cached ink is drawn through _drag_transform;
+        # transformed strokes are only built once, on release.
+        self._drag_point = None
+        self._drag_transform = None
+        self._drag_geometry = None
+        self._drag_frame = None
         self._shift = False
+        # Items whose preview must match the result exactly: pictures always, and
+        # pressure ink while scaling (a mapped outline would scale its thickness).
+        self._drag_rebuilt = {}
+        self._drag_scaling = False
         # Optional Library-like object: store_image(bytes) -> key, image_path(key) -> Path.
         self.image_store = None
         self._pixmaps = {}
@@ -158,6 +268,10 @@ class InkCanvas(QWidget):
         if not 1 <= width <= 40:
             raise ValueError("Pen width must be between 1 and 40")
         self.pen_width = float(width)
+
+    @property
+    def gesture_active(self):
+        return self._gesture is not None
 
     # View -------------------------------------------------------------------
 
@@ -292,7 +406,8 @@ class InkCanvas(QWidget):
     def _paste_items(self, raw):
         try:
             payload = json.loads(raw.decode("utf-8"))
-            strokes = [Stroke(e["points"], e["color"], e["width"]) for e in payload["strokes"]]
+            strokes = [Stroke(e["points"], e["color"], e["width"], e.get("pressures"))
+                       for e in payload["strokes"]]
             images = [PlacedImage(e["key"], e["x"], e["y"], e["width"], e["height"], e.get("angle", 0))
                       for e in payload["images"]]
         except (ValueError, TypeError, KeyError, NoteFormatError):
@@ -368,7 +483,7 @@ class InkCanvas(QWidget):
     def _shifted(item, dx, dy):
         if isinstance(item, PlacedImage):
             return item.moved(dx, dy)
-        return Stroke(tuple((x + dx, y + dy) for x, y in item.points), item.color, item.width)
+        return item.with_points((x + dx, y + dy) for x, y in item.points)
 
     def _geometry(self, items):
         """Bounds of the stroke points and picture corners (no pen width)."""
@@ -377,14 +492,14 @@ class InkCanvas(QWidget):
         xs, ys = [x for x, _ in points], [y for _, y in points]
         return QRectF(QPointF(min(xs), min(ys)), QPointF(max(xs), max(ys)))
 
-    def _shown_selection(self):
-        return self._preview if self._preview is not None else self.selection
-
     def _frame(self):
-        """Dashed selection frame around the (possibly previewed) selection."""
-        items = self._shown_selection()
+        """Dashed selection frame, following the selection while it is dragged."""
+        items = self.selection
         pad = max([i.width / 2 for i in items if isinstance(i, Stroke)], default=0) + FRAME_PAD / self.zoom
-        return self._geometry(items).adjusted(-pad, -pad, pad, pad)
+        geometry = self._drag_geometry if self._drag_geometry is not None else self._geometry(items)
+        if self._drag_transform is not None:
+            geometry = self._drag_transform.mapRect(geometry)
+        return geometry.adjusted(-pad, -pad, pad, pad)
 
     def _selection_rect(self):
         return self._frame()
@@ -424,15 +539,17 @@ class InkCanvas(QWidget):
             sh = math.hypot(scale[0] * math.sin(a), scale[1] * math.cos(a))
             w, h = item.width * sw, item.height * sh
             return PlacedImage(item.key, cx - w / 2, cy - h / 2, w, h, item.angle + angle)
-        return Stroke(tuple(fn(p) for p in item.points), item.color, item.width)
+        return item.with_points(fn(p) for p in item.points)
 
-    def _transform_preview(self, point):
-        """Selection as it would be after dragging the grabbed handle to point."""
-        items = self.selection
+    def _drag_params(self, point):
+        """(QTransform, point function, angle, scale) for dragging the grabbed
+        handle (or the selection itself) from where it was pressed to point."""
+        rect = self._drag_geometry
+        transform = QTransform()
         if self._handle is None:
             dx, dy = point[0] - self._move_from[0], point[1] - self._move_from[1]
-            return [self._shifted(item, dx, dy) for item in items]
-        rect = self._geometry(items)
+            transform.translate(dx, dy)
+            return transform, lambda p: (p[0] + dx, p[1] + dy), 0.0, (1.0, 1.0)
         if self._handle == "rotate":
             cx, cy = rect.center().x(), rect.center().y()
             start = math.atan2(self._move_from[1] - cy, self._move_from[0] - cx)
@@ -441,20 +558,21 @@ class InkCanvas(QWidget):
                 degrees = round(degrees / SNAP_DEGREES) * SNAP_DEGREES
             a = math.radians(degrees)
             cos, sin = math.cos(a), math.sin(a)
-            fn = lambda p: (cx + (p[0] - cx) * cos - (p[1] - cy) * sin,
-                            cy + (p[0] - cx) * sin + (p[1] - cy) * cos)
-            return [self._transformed(item, fn, angle=degrees) for item in items]
+            transform.translate(cx, cy)
+            transform.rotate(degrees)
+            transform.translate(-cx, -cy)
+            return transform, (lambda p: (cx + (p[0] - cx) * cos - (p[1] - cy) * sin,
+                                          cy + (p[0] - cx) * sin + (p[1] - cy) * cos)), degrees, (1.0, 1.0)
         hx, hy = HANDLES[self._handle]
         scales = []
-        for direction, extent, moved, low, high in (
-                (hx, rect.width(), point[0] - self._move_from[0], rect.left(), rect.right()),
-                (hy, rect.height(), point[1] - self._move_from[1], rect.top(), rect.bottom())):
+        for direction, extent, moved in ((hx, rect.width(), point[0] - self._move_from[0]),
+                                         (hy, rect.height(), point[1] - self._move_from[1])):
             if not direction or extent < 1e-6:
                 scales.append(1.0)
             else:
                 scales.append(max(extent + direction * moved, MIN_EXTENT) / extent)
         sx, sy = scales
-        pictures_only = all(isinstance(item, PlacedImage) for item in items)
+        pictures_only = all(isinstance(item, PlacedImage) for item in self.selection)
         if hx and hy and (self._shift != pictures_only):
             # Keep proportions: project the drag onto the frame's diagonal. A flat
             # line or a dot has no proportion to keep, so follow its own extent.
@@ -467,8 +585,69 @@ class InkCanvas(QWidget):
                 sx = sy
         ax = rect.right() if hx < 0 else rect.left()
         ay = rect.bottom() if hy < 0 else rect.top()
-        fn = lambda p: (ax + (p[0] - ax) * sx, ay + (p[1] - ay) * sy)
-        return [self._transformed(item, fn, scale=(sx, sy)) for item in items]
+        transform.translate(ax, ay)
+        transform.scale(sx, sy)
+        transform.translate(-ax, -ay)
+        return transform, lambda p: (ax + (p[0] - ax) * sx, ay + (p[1] - ay) * sy), 0.0, (sx, sy)
+
+    def _begin_drag(self, point, handle):
+        self._handle, self._move_from = handle, point
+        self._drag_geometry = self._geometry(self.selection)
+        self._drag_frame = self._frame()
+
+    def _drag_area(self, transform=None, items=()):
+        """Document area covered by the dragged selection, its frame, handles,
+        halo, and any exactly rebuilt items."""
+        transform = transform if transform is not None else self._drag_transform
+        rect = self._drag_frame if transform is None else transform.mapRect(self._drag_frame)
+        for item in items:
+            rect = rect.united(self._item_rect(item))
+        ink = max([ink_width(i) for i in self.selection if isinstance(i, Stroke)], default=0)
+        margin = (ROTATE_OFFSET + 2 * HANDLE_REACH) / self.zoom + ink + 8
+        return rect.adjusted(-margin, -margin, margin, margin)
+
+    def _rebuild_for_preview(self, params):
+        transform, fn, angle, scale = params
+        self._drag_scaling = scale != (1.0, 1.0)
+        return {id(item): self._transformed(item, fn, angle, scale) for item in self.selection
+                if isinstance(item, PlacedImage)}
+
+    def _paint_pressure_preview(self, painter, stroke, transform):
+        """Scaled pressure ink while dragging: each segment at its own pressure
+        width. Mapping the outline would scale its thickness too, and rebuilding
+        outlines on every pointer move made scaling a sentence lag."""
+        points = [transform.map(QPointF(*p)) for p in stroke.points]
+        color = qcolor(stroke.color)
+        for a, b, pa, pb in zip(points, points[1:], stroke.pressures, stroke.pressures[1:]):
+            painter.setPen(QPen(color, pressure_width(stroke.width, (pa + pb) / 2), Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawLine(a, b)
+
+    def _update_area(self, area):
+        self.update(QRectF((area.x() - self._ox) * self.zoom, (area.y() - self._oy) * self.zoom,
+                           area.width() * self.zoom, area.height() * self.zoom).toAlignedRect())
+
+    def _drag_to(self, point):
+        before = self._drag_area(items=self._drag_rebuilt.values())
+        params = self._drag_params(point)
+        self._drag_point = point
+        self._drag_transform = params[0]
+        self._drag_rebuilt = self._rebuild_for_preview(params)
+        self._update_area(before.united(self._drag_area(items=self._drag_rebuilt.values())))
+
+    def _commit_drag(self):
+        """Transformed copies of the selection; reuse cached ink for exact maps."""
+        transform, fn, angle, scale = self._drag_params(self._drag_point)
+        items = []
+        for item in self.selection:
+            new = self._transformed(item, fn, angle, scale)
+            if isinstance(item, Stroke) and (item.pressures is None or scale == (1.0, 1.0)):
+                # Affine maps keep centre-line curves exact; pressure outlines stay
+                # exact only for moves and rotations (scaling would stretch thickness).
+                path, bounds = self._entry(item)
+                self._cache[id(new)] = (new, transform.map(path), transform.mapRect(bounds))
+            items.append(new)
+        return items
 
     def keyPressEvent(self, event):
         if self.selection and event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
@@ -487,37 +666,64 @@ class InkCanvas(QWidget):
         note = self.note
         stroke = None
         if self._points is not None:
-            stroke = Stroke(self._snapped if self._snapped is not None else tuple(self._points),
-                            self._ink_color, self._ink_width)
+            stroke = (Stroke(self._snapped, self._ink_color, self._ink_width) if self._snapped is not None
+                      else self._ink_stroke(self._points))
         moved = None
-        if self._preview is not None:
-            mapping = {id(old): new for old, new in zip(self.selection, self._preview)}
+        dragged_area = None
+        if self._drag_point is not None:
+            # Where the selection was, was last shown, and lands: nothing else changes.
+            dragged_area = self._drag_area(QTransform()).united(
+                self._drag_area(items=self._drag_rebuilt.values()))
+            dragged = self._commit_drag()
+            # Cover where everything lands, not only the mapped frame.
+            dragged_area = dragged_area.united(self._drag_area(QTransform(), dragged))
+            mapping = {id(old): new for old, new in zip(self.selection, dragged)}
             moved = ([mapping.get(id(s), s) for s in note.strokes],
                      [mapping.get(id(i), i) for i in note.images])
-            self.selection = list(self._preview)
+            self.selection = dragged
         new_shape = self._gesture == "shape"
-        self._stop_gesture()
+        ink_only = self._gesture == "pen" and moved is None
+        # The live preview may differ from the committed ink (a snapped shape).
+        drawn = (QPolygonF([QPointF(*q) for q in self._points]).boundingRect()
+                 if ink_only and self._points else QRectF())
+        self._stop_gesture(repaint=not ink_only and dragged_area is None)
+        if dragged_area is not None:
+            self._update_area(dragged_area)
         if stroke is not None and note.add_stroke(stroke):
             if new_shape and note is self.note:
                 self.selection = [stroke]  # Show the frame and handles right away.
             self.changed.emit()
+        if ink_only:
+            # Only the new ink changed; repainting a full page per stroke lagged.
+            if stroke is not None:
+                drawn = drawn.united(self._entry(stroke)[1])
+            self._update_doc(drawn)
+            return
         if moved is not None and note.replace(*moved):
             self.changed.emit()
-        self.update()
+        if dragged_area is None:
+            self.update()
 
-    def _stop_gesture(self):
+    def _stop_gesture(self, repaint=True):
         was_active = self._gesture is not None
         self._hold.stop()
         self.note.end_erase()
         self._gesture = None
         self._points = None
+        self._pressures = None
+        self._live = None
         self._snapped = None
         self._source = None
         self._last_erase = None
         self._lasso = None
         self._move_from = None
         self._handle = None
-        self._preview = None
+        self._drag_point = None
+        self._drag_transform = None
+        self._drag_geometry = None
+        self._drag_frame = None
+        self._drag_rebuilt = {}
+        self._drag_scaling = False
         self._shape_start = None
         self._shape_end = None
         if self._erase_changed:
@@ -525,12 +731,40 @@ class InkCanvas(QWidget):
             self.changed.emit()
         if was_active:
             self.gesture_changed.emit(False)
-        self.update()
+        if repaint:
+            self.update()
 
     def _ink_stroke(self, points):
-        return Stroke(tuple(points), self._ink_color, self._ink_width)
+        pressures = self._pressures if self._pressures is not None and len(self._pressures) == len(points) else None
+        return Stroke(tuple(points), self._ink_color, self._ink_width, pressures)
 
-    def _press(self, position, source, eraser_tip=False):
+    def _live_outline(self):
+        """Outline of the stroke being drawn, built incrementally.
+
+        Every curve segment except the last is final once the next point exists,
+        so it is added to a cached path once; only the last segment is rebuilt
+        per repaint. Rebuilding the whole outline on each pen sample made long
+        strokes lag.
+        """
+        points, pressures, width = self._points, self._pressures, self._ink_width
+        final = len(points) - 2
+        if self._live is None:
+            first = (points[0], pressure_width(width, pressures[0]) / 2)
+            self._live = [0, add_outline(new_outline_path(), [first]), first]
+        if self._live[0] < final:
+            samples = pressure_samples(points, pressures, width, self._live[0] + 1, final)
+            add_outline(self._live[1], samples, first_disc=False)
+            self._live[0], self._live[2] = final, samples[-1]
+        tail = pressure_samples(points, pressures, width, final + 1, len(points) - 1)
+        return self._live[1], add_outline(new_outline_path(), tail, first_disc=False)
+
+    def _add_point(self, point, pressure):
+        self._points.append(point)
+        if self._pressures is not None:
+            pressure = clamp_pressure(pressure)
+            self._pressures.append(self._pressures[-1] if pressure is None else pressure)
+
+    def _press(self, position, source, eraser_tip=False, pressure=None):
         if not self.rect().contains(position.toPoint()):
             return
         self.finalize_current_gesture()
@@ -549,9 +783,9 @@ class InkCanvas(QWidget):
         elif self._gesture == "select":
             handle = self._handle_at(point)
             if handle is not None:
-                self._handle, self._move_from = handle, point
+                self._begin_drag(point, handle)
             elif self.selection and self._frame().contains(QPointF(*point)):
-                self._move_from = point
+                self._begin_drag(point, None)
             else:
                 self.clear_selection()
                 self._lasso = [point]
@@ -561,11 +795,14 @@ class InkCanvas(QWidget):
             self._ink_color, self._ink_width = self.pen_color, self.pen_width
         else:
             self._points = [point]
+            pressure = clamp_pressure(pressure)
+            self._pressures = [pressure] if pressure is not None and self.pressure_enabled else None
+            self._live = None
             self._ink_color, self._ink_width = self.pen_color, self.pen_width
             self._hold.start(self.HOLD_MS)
             self._update_doc(QRectF(*point, 0, 0))
 
-    def _move(self, position, source):
+    def _move(self, position, source, pressure=None):
         if source != self._source or self._gesture is None:
             return
         point = self.to_document(position)
@@ -574,8 +811,7 @@ class InkCanvas(QWidget):
                 self._erase(point)
         elif self._gesture == "select":
             if self._move_from is not None:
-                self._preview = self._transform_preview(point)
-                self.update()
+                self._drag_to(point)
             elif self._lasso is not None:
                 self._lasso.append(point)
                 self.update()
@@ -585,11 +821,11 @@ class InkCanvas(QWidget):
         elif self._points is not None and point != self._points[-1]:
             self._snapped = None
             previous = self._points[-1]
-            self._points.append(point)
+            self._add_point(point, pressure)
             self._hold.start(self.HOLD_MS)
             self._update_doc(QRectF(QPointF(*previous), QPointF(*point)).normalized())
 
-    def _release(self, position, source):
+    def _release(self, position, source, pressure=None):
         if source != self._source or self._gesture is None:
             return
         point = self.to_document(position)
@@ -600,14 +836,14 @@ class InkCanvas(QWidget):
                 self._lasso.append(point)
                 self._select_in(self._lasso)
             elif self._move_from is not None:
-                self._preview = self._transform_preview(point)
+                self._drag_point = point
         elif self._gesture == "shape":
             start = self._shape_start
             if math.dist(start, point) > 2:
                 self._points = list(shape_points(self.shape, start, point))
                 self._snapped = None
         elif self._points is not None and point != self._points[-1]:
-            self._points.append(point)
+            self._add_point(point, pressure)
             self._snapped = None
         self.finalize_current_gesture()
 
@@ -648,7 +884,7 @@ class InkCanvas(QWidget):
     @classmethod
     def _hits_rendered(cls, stroke, x, y, radius):
         # Cover the round pen (or dot) and the antialiased edge of its pixels.
-        reach = radius + stroke.width / 2 + .5
+        reach = radius + ink_width(stroke) / 2 + .5
         if len(stroke.points) == 1:
             px, py = stroke.points[0]
             return math.hypot(x - px, y - py) <= reach
@@ -700,20 +936,38 @@ class InkCanvas(QWidget):
         """Cached (path, bounds) per stroke object; strokes are immutable."""
         entry = self._cache.get(id(stroke))
         if entry is None or entry[0] is not stroke:
-            path = self._path(stroke)
-            half = stroke.width / 2 + 1
+            pressured = stroke.pressures is not None and len(stroke.points) > 1
+            path = pressure_outline(stroke) if pressured else self._path(stroke)
+            half = 1 if pressured else stroke.width / 2 + 1
             bounds = path.boundingRect().adjusted(-half, -half, half, half)
             entry = (stroke, path, bounds)
             self._cache[id(stroke)] = entry
         return entry[1:]
+
+    def _centerline(self, stroke):
+        """Simple centre-line path for the halo. Stroking a pressure outline
+        (hundreds of discs) with a wide pen cost milliseconds per stroke and
+        made dragging a selected sentence lag."""
+        if stroke.pressures is None or len(stroke.points) == 1:
+            return self._entry(stroke)[0]
+        entry = self._centerlines.get(id(stroke))
+        if entry is None or entry[0] is not stroke:
+            entry = (stroke, self._path(stroke))
+            self._centerlines[id(stroke)] = entry
+        return entry[1]
 
     def _paint_stroke(self, painter, stroke, path=None):
         color = qcolor(stroke.color)
         if len(stroke.points) == 1:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
-            radius = stroke.width / 2
+            radius = ink_width(stroke) / 2
             painter.drawEllipse(QPointF(*stroke.points[0]), radius, radius)
+            return
+        if stroke.pressures is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawPath(path if path is not None else pressure_outline(stroke))
             return
         painter.setPen(QPen(color, stroke.width, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
@@ -733,10 +987,10 @@ class InkCanvas(QWidget):
             self._pixmaps[key] = pixmap
         return self._pixmaps[key]
 
-    def _paint_images(self, painter, exposed, hidden, extra):
+    def _paint_images(self, painter, exposed, images):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        for image in [i for i in self.note.images if id(i) not in hidden] + extra:
-            if not self._item_rect(image).intersects(exposed):
+        for image in images:
+            if exposed is not None and not self._item_rect(image).intersects(exposed):
                 continue
             painter.save()
             painter.translate(image.x + image.width / 2, image.y + image.height / 2)
@@ -760,10 +1014,10 @@ class InkCanvas(QWidget):
         if len(stroke.points) == 1:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(HALO_COLOR)
-            radius = stroke.width / 2 + 4
+            radius = ink_width(stroke) / 2 + 4
             painter.drawEllipse(QPointF(*stroke.points[0]), radius, radius)
             return
-        painter.setPen(QPen(HALO_COLOR, stroke.width + 8, Qt.PenStyle.SolidLine,
+        painter.setPen(QPen(HALO_COLOR, ink_width(stroke) + 8, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
@@ -775,7 +1029,7 @@ class InkCanvas(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(frame)
-        if self._preview is not None and self._handle is not None:
+        if self._drag_transform is not None and self._handle is not None:
             return  # Handles would jump around while transforming.
         handles = self.selection_handles()
         rotate = QPointF(*handles.pop("rotate"))
@@ -828,23 +1082,51 @@ class InkCanvas(QWidget):
         if self.paper == "grid":
             self._paint_grid(painter, exposed)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        hidden = {id(item) for item in self.selection} if self._preview is not None else set()
-        shown = self._shown_selection()
-        self._paint_images(painter, exposed, hidden,
-                           [i for i in shown if isinstance(i, PlacedImage)] if hidden else [])
-        selected = {id(item) for item in shown}
+        drag = self._drag_transform
+        selected = {id(item) for item in self.selection}
+        hidden = selected if drag is not None else set()
+        self._paint_images(painter, exposed, [i for i in self.note.images if id(i) not in hidden])
+        if drag is not None:
+            # Pictures preview exactly as they will be committed (a skewing
+            # transform would slant a rotated picture).
+            self._paint_images(painter, exposed, [self._drag_rebuilt[id(i)] for i in self.selection
+                                                  if isinstance(i, PlacedImage) and id(i) in self._drag_rebuilt])
         live = {id(s) for s in self.note.strokes}
         if len(self._cache) > len(live) + 256:
             self._cache = {key: value for key, value in self._cache.items() if key in live}
-        extra = [i for i in shown if isinstance(i, Stroke)] if hidden else []
-        for stroke in [s for s in self.note.strokes if id(s) not in hidden] + extra:
+            self._centerlines = {key: value for key, value in self._centerlines.items() if key in live}
+        for stroke in self.note.strokes:
+            if id(stroke) in hidden:
+                continue
             path, bounds = self._entry(stroke)
             if bounds.adjusted(-5, -5, 5, 5).intersects(exposed):
                 if id(stroke) in selected:
-                    self._paint_halo(painter, stroke, path)
+                    self._paint_halo(painter, stroke, self._centerline(stroke))
                 self._paint_stroke(painter, stroke, path)
+        if drag is not None:
+            # Cached ink mapped through the drag: no stroke is rebuilt per pointer move.
+            for stroke in self.selection:
+                if isinstance(stroke, Stroke) and len(stroke.points) == 1:
+                    dot = drag.map(QPointF(*stroke.points[0]))
+                    moved = stroke.with_points([(dot.x(), dot.y())])  # A dot has no path to map.
+                    self._paint_halo(painter, moved, None)
+                    self._paint_stroke(painter, moved)
+                elif isinstance(stroke, Stroke) and self._drag_scaling and stroke.pressures is not None:
+                    self._paint_halo(painter, stroke, drag.map(self._centerline(stroke)))
+                    self._paint_pressure_preview(painter, stroke, drag)
+                elif isinstance(stroke, Stroke):
+                    path, bounds = self._entry(stroke)
+                    if drag.mapRect(bounds).adjusted(-5, -5, 5, 5).intersects(exposed):
+                        self._paint_halo(painter, stroke, drag.map(self._centerline(stroke)))
+                        self._paint_stroke(painter, stroke, drag.map(path))
         if self._points is not None:
-            self._paint_stroke(painter, self._ink_stroke(self._snapped or self._points))
+            if self._snapped is None and self._pressures is not None and len(self._points) > 1:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(qcolor(self._ink_color))
+                for path in self._live_outline():
+                    painter.drawPath(path)
+            else:
+                self._paint_stroke(painter, self._ink_stroke(self._snapped or self._points))
         elif self._shape_start is not None and self._shape_end is not None:
             self._paint_stroke(painter, self._ink_stroke(
                 shape_points(self.shape, self._shape_start, self._shape_end)))
@@ -918,16 +1200,18 @@ class InkCanvas(QWidget):
             return
         self._tablet_time = time.monotonic()
         self._track_modifiers(event)
+        reader = getattr(event, "pressure", None)
+        pressure = reader() if reader is not None else None
         if event.type() == QEvent.Type.TabletPress:
             if self._source == "mouse":
                 self._stop_gesture()
             pointer = getattr(event, "pointerType", None)
             eraser_tip = pointer is not None and pointer() == QPointingDevice.PointerType.Eraser
-            self._press(event.position(), "tablet", eraser_tip)
+            self._press(event.position(), "tablet", eraser_tip, pressure)
         elif event.type() == QEvent.Type.TabletMove:
-            self._move(event.position(), "tablet")
+            self._move(event.position(), "tablet", pressure)
         else:
-            self._release(event.position(), "tablet")
+            self._release(event.position(), "tablet", pressure)
         event.accept()
 
 
