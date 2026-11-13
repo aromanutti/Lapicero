@@ -113,6 +113,7 @@ class LapiceroWindow(QMainWindow):
         for attribute, label, handler in (("new_subject_button", "New subject", self.new_subject),
                                           ("new_section_button", "New section", self.new_section),
                                           ("new_page_button", "New page", self.new_page),
+                                          ("delete_section_button", "Delete section", self.delete_section),
                                           ("rename_button", "Rename selected", self.rename_selected),
                                           ("import_button", "Import old note…", self.import_note)):
             button = QPushButton(label)
@@ -439,11 +440,15 @@ class LapiceroWindow(QMainWindow):
             parent.setData(0, Qt.ItemDataRole.UserRole, ("subject", subject.id))
             if current == ("subject", subject.id):
                 match = parent
-            for section in subject.sections:
-                child = QTreeWidgetItem(parent, [section.name])
+            pending = [(parent, section) for section in subject.sections]
+            while pending:
+                owner, section = pending.pop(0)
+                child = QTreeWidgetItem(owner, [section.name])
                 child.setData(0, Qt.ItemDataRole.UserRole, ("section", section.id))
                 if current == ("section", section.id):
                     match = child
+                # Subsections first, then the section's own pages.
+                pending[:0] = [(child, nested) for nested in section.sections]
                 for page in section.pages:
                     leaf = QTreeWidgetItem(child, [page.name])
                     leaf.setData(0, Qt.ItemDataRole.UserRole, ("page", page.id))
@@ -468,6 +473,7 @@ class LapiceroWindow(QMainWindow):
         self.paper_combo.setEnabled(page_id is not None)
         self.new_section_button.setEnabled(bool(selected))
         self.new_page_button.setEnabled(self._section_id() is not None)
+        self.delete_section_button.setEnabled(bool(selected) and selected[0] == "section")
         self.import_button.setEnabled(self._section_id() is not None)
         self.rename_button.setEnabled(bool(selected))
         self.undo_button.setEnabled(page_id is not None)
@@ -535,20 +541,35 @@ class LapiceroWindow(QMainWindow):
             self.save()
 
     def new_section(self):
+        """Top-level section under a subject; a subsection under any section or page."""
         selected = self._selected()
         if not selected:
             return
-        subject_id = selected[1] if selected[0] == "subject" else None
-        if subject_id is None:
-            item = self.tree.currentItem()
-            while item.parent() is not None:
-                item = item.parent()
-            subject_id = item.data(0, Qt.ItemDataRole.UserRole)[1]
-        name = self._name("New section")
+        parent_id = self._section_id()
+        name = self._name("New subsection" if parent_id else "New section")
         if name:
-            section = self.library.create_section(subject_id, name)
+            if parent_id is None:
+                section = self.library.create_section(selected[1], name)
+            else:
+                section = self.library.create_subsection(parent_id, name)
             self._refresh(("section", section.id))
             self.save()
+
+    def delete_section(self):
+        selected = self._selected()
+        if not selected or selected[0] != "section":
+            return
+        section = self.library.section(selected[1])
+        choice = QMessageBox.question(
+            self, "Delete section",
+            f"Delete \"{section.name}\" with all of its pages and subsections? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        parent = self.tree.currentItem().parent().data(0, Qt.ItemDataRole.UserRole)
+        self.library.delete_section(section.id)
+        self._refresh(parent)
+        self.save()
 
     def new_page(self):
         section_id = self._section_id()

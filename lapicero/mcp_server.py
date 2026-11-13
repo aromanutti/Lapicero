@@ -19,6 +19,7 @@ TIMEOUT = 70.0
 NOT_RUNNING = "Lapicero is not running (or its AI bridge is off). Open Lapicero and try again."
 
 INSTRUCTIONS = """Lapicero is a handwritten-notes app: Subjects > Sections > Pages, each page an infinite canvas.
+Sections can contain nested subsections.
 Coordinates are document units (x grows right, y grows down; 1 unit = 1 pixel at 100% zoom).
 Use list_pages to find pages, read_page to see one as an image (the result says which document
 rectangle the image covers and its scale, so image pixel (px, py) is document
@@ -63,7 +64,7 @@ def _with_image(result):
 
 @server.tool(structured_output=False)
 def list_pages() -> str:
-    """List subjects, sections and pages (ids, names, stroke counts) and which page is open."""
+    """List subjects, nested sections and pages (ids, names, stroke counts) and which page is open."""
     return json.dumps(call("list_pages"), ensure_ascii=False)
 
 

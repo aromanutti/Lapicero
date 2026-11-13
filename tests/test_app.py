@@ -568,3 +568,44 @@ def test_save_rejects_invalid_direct_mutations_without_writing(window, monkeypat
     page.note.strokes.pop()
     page.name = "  padded  "
     assert not window.save() and window.library.path.read_bytes() == before
+
+
+def test_new_section_on_a_section_creates_a_nested_subsection(window, monkeypatch):
+    subject, section, page = populate(window, monkeypatch)
+    window.tree.setCurrentItem(window.tree.topLevelItem(0).child(0))
+    names(monkeypatch, "Kinematics")
+    window.new_section()
+    assert [s.name for s in subject.sections] == ["Vectors"]
+    assert [s.name for s in section.sections] == ["Kinematics"]
+    assert window._selected() == ("section", section.sections[0].id)
+    assert window.tree.currentItem().parent().text(0) == "Vectors"
+    names(monkeypatch, "Deep page")
+    window.new_page()
+    assert section.sections[0].pages[0].name == "Deep page"
+    window.tree.setCurrentItem(window.tree.topLevelItem(0))
+    names(monkeypatch, "Top level")
+    window.new_section()
+    assert [s.name for s in subject.sections] == ["Vectors", "Top level"]
+    reopened = Library.load(window.library.path)
+    assert reopened.subjects[0].sections[0].sections[0].pages[0].name == "Deep page"
+    listed = window.ai.list_pages()["subjects"][0]["sections"][0]["sections"][0]
+    assert (listed["name"], listed["pages"][0]["name"], listed["sections"]) == ("Kinematics", "Deep page", [])
+
+
+def test_delete_section_asks_first_and_closes_its_open_page(window, monkeypatch):
+    subject, section, page = populate(window, monkeypatch)
+    assert not window.delete_section_button.isEnabled()  # A page is selected.
+    window.tree.setCurrentItem(window.tree.topLevelItem(0).child(0))
+    assert window.delete_section_button.isEnabled() and window.delete_section_button.isVisible()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    window.delete_section()
+    assert subject.sections == [section]
+    window.tree.setCurrentItem(window.tree.topLevelItem(0).child(0).child(0))
+    assert window._page_id == page.id
+    window.tree.setCurrentItem(window.tree.topLevelItem(0).child(0))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    window.delete_section()
+    assert subject.sections == []
+    assert window._page_id is None and not window.canvas.isEnabled()
+    assert window._selected() == ("subject", subject.id)
+    assert Library.load(window.library.path).subjects[0].sections == []

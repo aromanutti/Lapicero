@@ -25,7 +25,7 @@ Remove-Item Env:QT_QPA_PLATFORM
 
 ## Organize and draw
 
-The left tree holds **subjects → sections → pages**. Use New subject, New section (under the selected subject), and New page (in the selected or containing section). Rename selected changes the highlighted item. Select a page to draw. Each page is an **infinite canvas** that grows right and down: scroll with the wheel (Shift+wheel sideways, middle-button drag to pan, or the scrollbars), zoom with Ctrl+wheel, and reset zoom with Ctrl+0.
+The left tree holds **subjects → sections → pages**. Use New subject, New section, and New page (in the selected or containing section). New section with a subject selected adds a top-level section; with a section or page selected it adds a **subsection** inside that section, so sections nest to any depth. Delete section removes the highlighted section with all its pages and subsections after you confirm; it cannot be undone. Rename selected changes the highlighted item. Select a page to draw. Each page is an **infinite canvas** that grows right and down: scroll with the wheel (Shift+wheel sideways, middle-button drag to pan, or the scrollbars), zoom with Ctrl+wheel, and reset zoom with Ctrl+0.
 
 A compact toolbar floats over the top center of the page, like OneNote's, so the page uses the whole window (there is no bottom status bar). Hover its edge for a shortcut list. Its right end shows **Saved** or, in red, **Not saved** (hover for details). Tools:
 
@@ -64,7 +64,7 @@ While Lapicero is open, AI apps that speak MCP (Claude Code, Claude Desktop, and
 
 | Tool | What it does |
 | --- | --- |
-| `list_pages` | Subjects → sections → pages, with ids, and which page is open |
+| `list_pages` | Subjects → nested sections → pages, with ids, and which page is open |
 | `read_page` | A page (or what you are looking at, or any rectangle) as an image |
 | `write_text` | Writes text as handwriting-style ink at a position |
 | `draw_shape` / `draw_strokes` | Draws a line, arrow, rectangle, ellipse, triangle, or freehand strokes |

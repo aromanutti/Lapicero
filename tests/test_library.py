@@ -336,3 +336,50 @@ def test_stroke_pressures_round_trip_and_stay_optional(tmp_path):
                    '"width":3,"pressures":[0.5]}]}]}]}]}', encoding="utf-8")
     with pytest.raises(LibraryFormatError):
         Library.load(bad)
+
+
+def test_nested_sections_lookup_save_and_reload(tmp_path):
+    library, subject, section, page = make_page()
+    child = library.create_subsection(section.id, "Kinematics")
+    grandchild = library.create_subsection(child.id, "Projectiles")
+    deep_page = library.create_page(grandchild.id, "Deep")
+    assert section.sections == [child] and child.sections == [grandchild]
+    assert library.section(grandchild.id) is grandchild
+    assert library.page(deep_page.id) is deep_page
+    library.rename_section(grandchild.id, "Ballistics")
+    library.save(tmp_path / "library.json")
+    reopened = Library.load(tmp_path / "library.json")
+    loaded = reopened.subjects[0].sections[0].sections[0].sections[0]
+    assert (loaded.id, loaded.name, loaded.pages[0].id) == (grandchild.id, "Ballistics", deep_page.id)
+    assert not reopened.dirty
+    with pytest.raises(KeyError):
+        library.create_subsection("missing", "X")
+
+
+def test_sections_without_children_keep_the_previous_file_format(tmp_path):
+    library, subject, section, page = make_page()
+    library.save(tmp_path / "library.json")
+    raw = json.loads((tmp_path / "library.json").read_text())
+    assert set(raw["subjects"][0]["sections"][0]) == {"id", "name", "pages"}
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"version":1,"subjects":[{"id":"s","name":"S","sections":[{"id":"t","name":"T",'
+                   '"pages":[],"sections":{}}]}]}')
+    with pytest.raises(LibraryFormatError):
+        Library.load(bad)
+
+
+def test_delete_section_removes_its_pages_and_subsections():
+    library, subject, section, page = make_page()
+    sibling = library.create_section(subject.id, "Statics")
+    child = library.create_subsection(section.id, "Kinematics")
+    nested_page = library.create_page(child.id, "Nested")
+    removed = library.delete_section(child.id)
+    assert removed is child and section.sections == []
+    with pytest.raises(KeyError):
+        library.page(nested_page.id)
+    library.delete_section(section.id)
+    assert subject.sections == [sibling]
+    with pytest.raises(KeyError):
+        library.page(page.id)
+    with pytest.raises(KeyError):
+        library.delete_section(section.id)

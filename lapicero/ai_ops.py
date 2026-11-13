@@ -39,6 +39,13 @@ def _number(value, name):
     return float(value)
 
 
+
+def _section_listing(section):
+    return {"id": section.id, "name": section.name,
+            "pages": [{"id": page.id, "name": page.name, "strokes": len(page.note.strokes),
+                       "pictures": len(page.note.images)} for page in section.pages],
+            "sections": [_section_listing(child) for child in section.sections]}
+
 class AiOperations:
     """Read and write pages of a LapiceroWindow on behalf of AI tools.
 
@@ -120,12 +127,7 @@ class AiOperations:
     def list_pages(self):
         return {"current_page_id": self.window.current_page_id,
                 "subjects": [{"id": subject.id, "name": subject.name,
-                              "sections": [{"id": section.id, "name": section.name,
-                                            "pages": [{"id": page.id, "name": page.name,
-                                                       "strokes": len(page.note.strokes),
-                                                       "pictures": len(page.note.images)}
-                                                      for page in section.pages]}
-                                           for section in subject.sections]}
+                              "sections": [_section_listing(section) for section in subject.sections]}
                              for subject in self.library.subjects]}
 
     def read_page(self, page_id=None, area="content", x=None, y=None, width=None, height=None):

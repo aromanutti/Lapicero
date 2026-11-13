@@ -1,5 +1,7 @@
 """GUI-independent Subjects -> Sections -> Pages library.
 
+Sections nest: a section may hold subsections as well as pages.
+
 Pages are unbounded canvases in logical units; ink is stored as original point
 geometry. PAGE_WIDTH/PAGE_HEIGHT (approximately A4 at 96 dpi) only frame the
 area that imported standalone notes are fitted into.
@@ -42,6 +44,7 @@ class Section:
     id: str
     name: str
     pages: list[Page] = field(default_factory=list)
+    sections: list["Section"] = field(default_factory=list)
 
 
 @dataclass
@@ -110,6 +113,55 @@ def _images(entries):
     return images
 
 
+def _section(child, seen):
+    # Sections saved before nesting existed have no "sections" key.
+    if isinstance(child, dict) and "sections" not in child:
+        child = {**child, "sections": []}
+    _fields(child, ("id", "name", "pages", "sections"))
+    cid, cname = _identity(child, seen)
+    if not isinstance(child["pages"], list):
+        raise LibraryFormatError("Pages must be a list")
+    if not isinstance(child["sections"], list):
+        raise LibraryFormatError("Sections must be a list")
+    pages = []
+    for leaf in child["pages"]:
+        # Pages saved before paper choice existed were plain white.
+        if isinstance(leaf, dict) and "paper" not in leaf:
+            leaf = {**leaf, "paper": "plain"}
+        if isinstance(leaf, dict) and "images" not in leaf:
+            leaf = {**leaf, "images": []}
+        _fields(leaf, ("id", "name", "strokes", "paper", "images"))
+        if leaf["paper"] not in PAPERS:
+            raise LibraryFormatError("Unknown paper type")
+        pid, pname = _identity(leaf, seen)
+        strokes = _strokes(leaf["strokes"])
+        images = _images(leaf["images"])
+        note = Note(strokes=strokes, images=images)
+        note.mark_saved()
+        pages.append(Page(pid, pname, note, leaf["paper"]))
+    return Section(cid, cname, pages, [_section(nested, seen) for nested in child["sections"]])
+
+
+def _section_data(section):
+    data = {"id": section.id, "name": section.name, "pages": [
+        {"id": page.id, "name": page.name,
+         "strokes": [stroke.to_data() for stroke in page.note.strokes],
+         "paper": page.paper,
+         "images": [image.to_data() for image in page.note.images]}
+        for page in section.pages]}
+    # Only write the key when needed, so libraries without nesting keep their old format.
+    if section.sections:
+        data["sections"] = [_section_data(child) for child in section.sections]
+    return data
+
+
+def _walk(sections):
+    """Yield every section in the tree, parents before their subsections."""
+    for section in sections:
+        yield section
+        yield from _walk(section.sections)
+
+
 def _parse(data):
     _fields(data, ("version", "subjects"))
     if type(data["version"]) is not int or data["version"] != LIBRARY_VERSION:
@@ -123,29 +175,7 @@ def _parse(data):
         sid, name = _identity(item, seen)
         if not isinstance(item["sections"], list):
             raise LibraryFormatError("Sections must be a list")
-        sections = []
-        for child in item["sections"]:
-            _fields(child, ("id", "name", "pages"))
-            cid, cname = _identity(child, seen)
-            if not isinstance(child["pages"], list):
-                raise LibraryFormatError("Pages must be a list")
-            pages = []
-            for leaf in child["pages"]:
-                # Pages saved before paper choice existed were plain white.
-                if isinstance(leaf, dict) and "paper" not in leaf:
-                    leaf = {**leaf, "paper": "plain"}
-                if isinstance(leaf, dict) and "images" not in leaf:
-                    leaf = {**leaf, "images": []}
-                _fields(leaf, ("id", "name", "strokes", "paper", "images"))
-                if leaf["paper"] not in PAPERS:
-                    raise LibraryFormatError("Unknown paper type")
-                pid, pname = _identity(leaf, seen)
-                strokes = _strokes(leaf["strokes"])
-                images = _images(leaf["images"])
-                note = Note(strokes=strokes, images=images)
-                note.mark_saved()
-                pages.append(Page(pid, pname, note, leaf["paper"]))
-            sections.append(Section(cid, cname, pages))
+        sections = [_section(child, seen) for child in item["sections"]]
         subjects.append(Subject(sid, name, sections))
     return subjects
 
@@ -166,14 +196,8 @@ class Library:
 
     def _data(self):
         return {"version": LIBRARY_VERSION, "subjects": [
-            {"id": subject.id, "name": subject.name, "sections": [
-                {"id": section.id, "name": section.name, "pages": [
-                    {"id": page.id, "name": page.name,
-                     "strokes": [stroke.to_data() for stroke in page.note.strokes],
-                     "paper": page.paper,
-                     "images": [image.to_data() for image in page.note.images]}
-                    for page in section.pages]}
-                for section in subject.sections]}
+            {"id": subject.id, "name": subject.name,
+             "sections": [_section_data(section) for section in subject.sections]}
             for subject in self.subjects]}
 
     @property
@@ -187,19 +211,22 @@ class Library:
                 return subject
         raise KeyError(identifier)
 
-    def section(self, identifier):
+    def all_sections(self):
+        """Every section at any depth, in tree order."""
         for subject in self.subjects:
-            for section in subject.sections:
-                if section.id == identifier:
-                    return section
+            yield from _walk(subject.sections)
+
+    def section(self, identifier):
+        for section in self.all_sections():
+            if section.id == identifier:
+                return section
         raise KeyError(identifier)
 
     def page(self, identifier):
-        for subject in self.subjects:
-            for section in subject.sections:
-                for page in section.pages:
-                    if page.id == identifier:
-                        return page
+        for section in self.all_sections():
+            for page in section.pages:
+                if page.id == identifier:
+                    return page
         raise KeyError(identifier)
 
     def create_subject(self, name):
@@ -212,6 +239,22 @@ class Library:
         section = Section(uuid4().hex, _name(name))
         subject.sections.append(section)
         return section
+
+    def create_subsection(self, section_id, name):
+        parent = self.section(section_id)
+        section = Section(uuid4().hex, _name(name))
+        parent.sections.append(section)
+        return section
+
+    def delete_section(self, identifier):
+        """Remove a section with all of its pages and subsections; return it."""
+        containers = [subject.sections for subject in self.subjects]
+        containers += [section.sections for section in self.all_sections()]
+        for container in containers:
+            for index, section in enumerate(container):
+                if section.id == identifier:
+                    return container.pop(index)
+        raise KeyError(identifier)
 
     def create_page(self, section_id, name):
         section = self.section(section_id)
@@ -328,8 +371,10 @@ class Library:
 
         for subject in self.subjects:
             identity(subject)
-            for section in subject.sections:
+            for section in _walk(subject.sections):
                 identity(section)
+                if not isinstance(section.sections, list):
+                    raise LibraryFormatError("Sections must be a list")
                 for page in section.pages:
                     identity(page)
                     if page.paper not in PAPERS:
@@ -385,7 +430,6 @@ class Library:
         self._owned_path = target.absolute()
         self._owned_bytes = contents
         self._saved = data
-        for subject in self.subjects:
-            for section in subject.sections:
-                for page in section.pages:
-                    page.note.mark_saved()
+        for section in self.all_sections():
+            for page in section.pages:
+                page.note.mark_saved()
