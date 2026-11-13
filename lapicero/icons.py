@@ -151,3 +151,26 @@ def swatch_icon(color):
         p.setBrush(QColor(color))
         p.drawEllipse(QRectF(6, 6, 20, 20))
     return _canvas(paint)
+
+
+def ask_icon():
+    """Dashed selection box with a speech bubble: ask Claude about an area."""
+
+    def paint(p):
+        pen = QPen(INK, 1.4, Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(QRectF(3, 3, 17, 15))
+        _outline(p, 1.5)
+        p.setBrush(QColor("#d9e8fb"))
+        bubble = QPainterPath()
+        bubble.addRoundedRect(QRectF(13, 13, 16, 12), 4, 4)
+        bubble.moveTo(17, 25)
+        bubble.lineTo(15, 29.5)
+        bubble.lineTo(21, 25)
+        p.drawPath(bubble.simplified())
+        p.setPen(QPen(QColor("#2f7de1"), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        for x in (17.5, 21, 24.5):
+            p.drawPoint(QPointF(x, 19))
+
+    return _canvas(paint)

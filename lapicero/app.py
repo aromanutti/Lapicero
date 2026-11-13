@@ -7,13 +7,18 @@ from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QFormLayout, QFrame,
                                QGraphicsOpacityEffect, QGridLayout, QGroupBox, QHBoxLayout,
-                               QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox,
+                               QApplication, QInputDialog, QLabel, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QSlider, QToolButton,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import icons
+from .ai_ops import AiOperations
+from .ask import (ASK_EFFORTS, ASK_MODELS, MCP_CONFIG_FILE, AskPanel, ClaudeAsk, build_message,
+                  build_prompt, mcp_config)
+from .bridge import BridgeServer
 from .library import Library
 from .model import Note, NoteFormatError
+from .paths import bridge_info_path, default_library_path
 from .qt_canvas import CanvasView, InkCanvas
 
 
@@ -36,7 +41,7 @@ UI_SETTINGS = "ui.json"  # Window preferences beside the library file.
 # Save once the pen has rested this long: writing a whole library after every
 # stroke froze the app between letters. Close and Ctrl+S still save at once.
 AUTOSAVE_DELAY_MS = 1200
-SHORTCUTS = ("P pen · E eraser · L lasso · S shapes · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
+SHORTCUTS = ("P pen · E eraser · L lasso · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
              "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom · F11 fullscreen")
 
 
@@ -72,14 +77,14 @@ class PenPreset:
 
 
 class LapiceroWindow(QMainWindow):
-    def __init__(self, library_path=None, autosave_delay_ms=AUTOSAVE_DELAY_MS):
+    def __init__(self, library_path=None, autosave_delay_ms=AUTOSAVE_DELAY_MS, ai_bridge=False):
         super().__init__()
         self._unsaved = False
         self._autosave_delay = autosave_delay_ms
         self._autosave = QTimer(self)
         self._autosave.setSingleShot(True)
         self._autosave.timeout.connect(self._autosave_now)
-        path = Path(library_path) if library_path is not None else Path.home() / "Documents" / "Lapicero" / "library.json"
+        path = Path(library_path) if library_path is not None else default_library_path()
         self._save_error_shown = False
         try:
             self.library = Library.load(path)
@@ -124,6 +129,12 @@ class LapiceroWindow(QMainWindow):
         self.placeholder = QLabel("Select a page, or create Subject → Section → Page in the sidebar.")
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.placeholder, 1)
+        self.ask_panel = AskPanel()
+        self.ask_panel.hide()
+        layout.addWidget(self.ask_panel)
+        self.ai = AiOperations(self)
+        self._asks = {}  # ask id -> running ClaudeAsk
+        self.canvas.region_requested.connect(self.ask_about)
         self._page_id = None
         self.toolbar_size = self._load_ui_settings().get("toolbar_size", "medium")
         if self.toolbar_size not in TOOLBAR_SIZES:
@@ -135,6 +146,10 @@ class LapiceroWindow(QMainWindow):
         self._shortcuts()
         self._refresh()
         self._selection_changed()
+        self.bridge = None
+        self.bridge_error = None
+        if ai_bridge:
+            self.start_bridge()
 
     def _tool_button(self, toolbar, icon, tip, checkable=False):
         button = QToolButton()
@@ -197,6 +212,10 @@ class LapiceroWindow(QMainWindow):
         self.shape_button.setMenu(menu)
         self.shape_button.clicked.connect(lambda: self.canvas.set_mode("shape"))
         tools.addButton(self.shape_button)
+        self.ask_button = self._tool_button(
+            bar, icons.ask_icon(), "Ask Claude (A): drag a box around something, then type a question", True)
+        self.ask_button.clicked.connect(lambda: self.canvas.set_mode("ask"))
+        tools.addButton(self.ask_button)
         bar.addSeparator()
         self.fullscreen_button = self._tool_button(bar, icons.fullscreen_icon(), "Fullscreen (F11, Esc to leave)", True)
         self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
@@ -227,6 +246,20 @@ class LapiceroWindow(QMainWindow):
         self.size_combo.currentIndexChanged.connect(
             lambda: self.set_toolbar_size(self.size_combo.currentData()))
         form.addRow("Toolbar size:", self.size_combo)
+        settings = self._load_ui_settings()
+        self.ask_model_combo = QComboBox()
+        self.ask_effort_combo = QComboBox()
+        for combo, choices, key, tip in (
+                (self.ask_model_combo, ASK_MODELS, "ask_model", "Model that answers Ask Claude questions"),
+                (self.ask_effort_combo, ASK_EFFORTS, "ask_effort",
+                 "How hard Claude thinks: lower answers faster, higher is more thorough")):
+            for label, value in choices:
+                combo.addItem(label, value)
+            combo.setCurrentIndex(max(0, combo.findData(settings.get(key))))
+            combo.setToolTip(tip)
+            combo.currentIndexChanged.connect(self._save_ui_settings)
+        form.addRow("Claude model:", self.ask_model_combo)
+        form.addRow("Claude effort:", self.ask_effort_combo)
         self._sidebar_layout.addWidget(self.settings_box)
 
     def _pen_panel(self):
@@ -334,11 +367,18 @@ class LapiceroWindow(QMainWindow):
         for button in self.toolbar.findChildren(QToolButton):
             button.setIconSize(QSize(side, side))
         self._place_toolbar()
+        self._save_ui_settings()
+
+    def _save_ui_settings(self):
+        data = {"toolbar_size": self.toolbar_size}
+        if hasattr(self, "ask_model_combo"):
+            data["ask_model"] = self.ask_model_combo.currentData()
+            data["ask_effort"] = self.ask_effort_combo.currentData()
         try:
-            # A preference is not worth an error dialog; keep the size for this session.
+            # A preference is not worth an error dialog; keep it for this session.
             target = self.library.path.parent / UI_SETTINGS
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps({"toolbar_size": self.toolbar_size}), encoding="utf-8")
+            target.write_text(json.dumps(data), encoding="utf-8")
         except OSError:
             pass
 
@@ -367,7 +407,7 @@ class LapiceroWindow(QMainWindow):
                     self._use_preset(self.active_preset)
                     return True
                 tool = {Qt.Key.Key_E: self.eraser_button, Qt.Key.Key_L: self.select_button,
-                        Qt.Key.Key_S: self.shape_button}.get(key)
+                        Qt.Key.Key_S: self.shape_button, Qt.Key.Key_A: self.ask_button}.get(key)
                 if tool is not None:
                     tool.click()
                     return True
@@ -563,11 +603,91 @@ class LapiceroWindow(QMainWindow):
         if self._page_id:
             self.canvas.redo()
 
+    # AI bridge and Ask Claude ------------------------------------------------
+
+    @property
+    def current_page_id(self):
+        return self._page_id
+
+    def note_changed_externally(self):
+        """An AI tool added ink to some page: autosave it like the user's strokes."""
+        self._changed()
+
+    def start_bridge(self):
+        """Let local AI tools (the Lapicero MCP server) reach this window."""
+        if self.bridge is not None:
+            return True
+        bridge = BridgeServer(self.ai.handle, bridge_info_path(self.library.path), self)
+        try:
+            bridge.start()
+        except OSError as exc:
+            self.bridge_error = str(exc)
+            self.ask_button.setToolTip(f"AI bridge failed to start: {exc}")
+            return False
+        self.bridge = bridge
+        return True
+
+    def stop_bridge(self):
+        for ask in list(self._asks.values()):
+            ask.cancel()
+        if self.bridge is not None:
+            self.bridge.stop()
+            self.bridge = None
+
+    def ask_about(self, region, question=None):
+        """Ask Claude about a document region of the open page; returns the ask id or None."""
+        if self._page_id is None:
+            return None
+        if question is None:
+            question, ok = QInputDialog.getMultiLineText(
+                self, "Ask Claude", "Question about the selected area:")
+            if not ok:
+                return None
+        question = question.strip()
+        if not question:
+            return None
+        page = self.library.page(self._page_id)
+        ask_id = self.ai.create_ask(page, region, question)
+        self.ask_panel.add_question(ask_id, page.name, question)
+        if not self.start_bridge():
+            self.ask_panel.set_answer(ask_id, f"The AI bridge is not running: {self.bridge_error}", True)
+            return ask_id
+        config_path = self.bridge.info_path.parent / MCP_CONFIG_FILE
+        try:
+            config_path.write_text(json.dumps(mcp_config(self.bridge.info_path)), encoding="utf-8")
+        except OSError as exc:
+            self.ask_panel.set_answer(ask_id, f"Could not write {config_path}: {exc}", True)
+            return ask_id
+        ask = self.ai.asks[ask_id]
+        message = build_message(build_prompt(ask_id, page.name, question, ask["region"]), ask["png"])
+        run = ClaudeAsk(ask_id, message, config_path, config_path.parent, program=self.claude_program,
+                        model=self.ask_model_combo.currentData(), effort=self.ask_effort_combo.currentData(),
+                        parent=self)
+        run.finished.connect(self._answered)
+        self._asks[ask_id] = run
+        run.start()
+        return ask_id
+
+    claude_program = None  # Tests point this at a fake Claude Code executable.
+
+    def _answered(self, ask_id, text, is_error):
+        run = self._asks.pop(ask_id, None)
+        if run is not None:
+            run.deleteLater()
+        self.ask_panel.set_answer(ask_id, text, is_error)
+
     def closeEvent(self, event):
+        # Stop the bridge first, then run AI writes already queued, so the save below keeps them.
+        bridge_was_running = self.bridge is not None
+        if bridge_was_running:
+            self.bridge.stop()
+            self.bridge = None
+        QApplication.sendPostedEvents()
         self.canvas.finalize_current_gesture()
         if self._autosave.isActive():
             self.save()  # Flush the pending autosave; a failure falls through to the prompt.
         if not self.library.dirty:
+            self.stop_bridge()  # Also ends running questions.
             event.accept()
             return
         choice = QMessageBox.question(self, "Unsaved library",
@@ -575,6 +695,9 @@ class LapiceroWindow(QMainWindow):
                                       QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
                                       QMessageBox.StandardButton.Cancel)
         if choice == QMessageBox.StandardButton.Discard or (choice == QMessageBox.StandardButton.Save and self.save()):
+            self.stop_bridge()
             event.accept()
         else:
+            if bridge_was_running:
+                self.start_bridge()
             event.ignore()

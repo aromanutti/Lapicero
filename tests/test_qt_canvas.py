@@ -308,3 +308,29 @@ def test_tablet_precision_and_mouse_duplicate_suppression(canvas):
     mouse(canvas, "press", 70, 70)
     mouse(canvas, "release", 70, 70)
     assert len(canvas.note.strokes) == 2 and changes == [True, True]
+
+
+def test_pen_cursor_is_a_translucent_dot_in_the_ink_color(canvas):
+    canvas.set_mode("pen")
+    canvas.set_pen_color("#b73535")
+    canvas.set_pen_width(10)
+    cursor = canvas.cursor()
+    assert cursor.shape() == Qt.CursorShape.BitmapCursor
+    image = cursor.pixmap().toImage()
+    center = image.pixelColor(image.width() // 2, image.height() // 2)
+    assert (center.red(), center.green(), center.blue()) == (0xb7, 0x35, 0x35)
+    assert 60 < center.alpha() < 200  # See-through, not solid.
+    assert image.width() >= 10
+    canvas.set_pen_color("#205bb5")
+    image = canvas.cursor().pixmap().toImage()
+    assert image.pixelColor(image.width() // 2, image.height() // 2).blue() == 0xb5
+
+
+def test_no_tool_uses_the_crosshair(canvas):
+    for mode in InkCanvas.MODES:
+        canvas.set_mode(mode)
+        assert canvas.cursor().shape() != Qt.CursorShape.CrossCursor
+    canvas.set_mode("pen")
+    small = canvas.cursor().pixmap().width()
+    canvas.set_zoom(3.0)
+    assert canvas.cursor().pixmap().width() > small  # The tip follows zoom.

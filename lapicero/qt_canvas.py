@@ -10,7 +10,7 @@ import time
 
 from PySide6.QtCore import (QBuffer, QIODevice, QMimeData, QPointF, QRectF, Qt, QEvent,
                             QTimer, Signal)
-from PySide6.QtGui import (QColor, QImage, QPainter, QPainterPath, QPainterPathStroker, QPen, QTransform,
+from PySide6.QtGui import (QColor, QCursor, QImage, QPainter, QPainterPath, QPainterPathStroker, QPen, QTransform,
                            QPixmap, QPointingDevice, QPolygonF)
 from PySide6.QtWidgets import QApplication, QGridLayout, QScrollBar, QWidget
 
@@ -39,6 +39,34 @@ HANDLE_CURSORS = {"nw": Qt.CursorShape.SizeFDiagCursor, "se": Qt.CursorShape.Siz
                   "e": Qt.CursorShape.SizeHorCursor, "w": Qt.CursorShape.SizeHorCursor,
                   "rotate": Qt.CursorShape.PointingHandCursor}
 PLACEHOLDER_COLOR = "#e6e6e6"
+CURSOR_ALPHA = 110  # Pen-tip cursor: a translucent dot in the ink color, like OneNote.
+MIN_CURSOR_DOT = 4.0  # Pixels, so thin pens and far zoom still show a tip.
+MAX_CURSOR = 128
+
+
+def tip_cursor(color, diameter, ring=False):
+    """A dot (pens, shapes) or ring (eraser) of ``diameter`` screen pixels, hotspot in the center."""
+    diameter = max(MIN_CURSOR_DOT, min(float(diameter), MAX_CURSOR - 4))
+    side = math.ceil(diameter) + 4
+    pixmap = QPixmap(side, side)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    center = QPointF(side / 2, side / 2)
+    if ring:
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 3))
+        painter.drawEllipse(center, diameter / 2, diameter / 2)
+        painter.setPen(QPen(QColor(60, 60, 60, 220), 1.2))
+        painter.drawEllipse(center, diameter / 2, diameter / 2)
+    else:
+        tint = qcolor(color[:7])
+        tint.setAlpha(CURSOR_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(tint)
+        painter.drawEllipse(center, diameter / 2, diameter / 2)
+    painter.end()
+    return QCursor(pixmap, side // 2, side // 2)
 SELECTION_COLOR = "#2f7de1"
 
 
@@ -159,13 +187,15 @@ class InkCanvas(QWidget):
     changed = Signal()
     view_changed = Signal()
     gesture_changed = Signal(bool)  # True while a pen/eraser/lasso/shape gesture is down.
+    region_requested = Signal(QRectF)  # Ask tool: a document rectangle the user dragged.
     HOLD_MS = 500
     MOUSE_SUPPRESSION_SECONDS = .15
     ERASER_RADIUS = 10
     GRID = 24
     MIN_ZOOM, MAX_ZOOM = .25, 4.0
     WHEEL_STEP = 60
-    MODES = ("pen", "eraser", "select", "shape")
+    MODES = ("pen", "eraser", "select", "shape", "ask")
+    MIN_ASK_SIDE = 8.0  # Smallest ask rectangle side, in screen pixels.
     SHAPES = SHAPE_KINDS
 
     def __init__(self, note=None, parent=None):
@@ -222,6 +252,7 @@ class InkCanvas(QWidget):
         self._hold = QTimer(self)
         self._hold.setSingleShot(True)
         self._hold.timeout.connect(self._hold_end)
+        self._apply_cursor()
 
     # Settings ---------------------------------------------------------------
 
@@ -245,7 +276,12 @@ class InkCanvas(QWidget):
         self._apply_cursor()
 
     def _apply_cursor(self):
-        self.setCursor(Qt.CursorShape.ArrowCursor if self.mode == "select" else Qt.CursorShape.CrossCursor)
+        if self.mode in ("select", "ask"):
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        elif self.mode == "eraser":
+            self.setCursor(tip_cursor(None, self.ERASER_RADIUS * 2 * self.zoom, ring=True))
+        else:  # Pen and shapes: the tip, in the ink color and roughly the ink width.
+            self.setCursor(tip_cursor(self.pen_color, self.pen_width * self.zoom))
 
     def set_shape(self, shape):
         if shape not in self.SHAPES:
@@ -262,12 +298,14 @@ class InkCanvas(QWidget):
         # Use Stroke's strict JSON-compatible color validation.
         Stroke(((0, 0),), color, 1)
         self.pen_color = color
+        self._apply_cursor()
 
     def set_pen_width(self, width):
         Stroke(((0, 0),), "#202020", width)
         if not 1 <= width <= 40:
             raise ValueError("Pen width must be between 1 and 40")
         self.pen_width = float(width)
+        self._apply_cursor()
 
     @property
     def gesture_active(self):
@@ -294,6 +332,7 @@ class InkCanvas(QWidget):
         anchor = anchor if anchor is not None else QPointF(self.width() / 2, self.height() / 2)
         fixed = self.to_document(anchor)
         self.zoom = zoom
+        self._apply_cursor()  # The tip follows the zoomed ink width.
         self._ox = self._oy = None
         self.scroll_to(fixed[0] - anchor.x() / zoom, fixed[1] - anchor.y() / zoom)
         self.update()
@@ -789,7 +828,7 @@ class InkCanvas(QWidget):
             else:
                 self.clear_selection()
                 self._lasso = [point]
-        elif self._gesture == "shape":
+        elif self._gesture in ("shape", "ask"):
             self.clear_selection()
             self._shape_start = point
             self._ink_color, self._ink_width = self.pen_color, self.pen_width
@@ -815,7 +854,7 @@ class InkCanvas(QWidget):
             elif self._lasso is not None:
                 self._lasso.append(point)
                 self.update()
-        elif self._gesture == "shape":
+        elif self._gesture in ("shape", "ask"):
             self._shape_end = point
             self.update()
         elif self._points is not None and point != self._points[-1]:
@@ -837,6 +876,14 @@ class InkCanvas(QWidget):
                 self._select_in(self._lasso)
             elif self._move_from is not None:
                 self._drag_point = point
+        elif self._gesture == "ask":
+            start = self._shape_start
+            region = QRectF(QPointF(*start), QPointF(*point)).normalized()
+            self._stop_gesture()
+            side = self.MIN_ASK_SIDE / self.zoom
+            if region.width() >= side and region.height() >= side:
+                self.region_requested.emit(region)
+            return
         elif self._gesture == "shape":
             start = self._shape_start
             if math.dist(start, point) > 2:
@@ -1127,6 +1174,12 @@ class InkCanvas(QWidget):
                     painter.drawPath(path)
             else:
                 self._paint_stroke(painter, self._ink_stroke(self._snapped or self._points))
+        elif self._gesture == "ask" and self._shape_start is not None and self._shape_end is not None:
+            dash = QPen(QColor(SELECTION_COLOR), 1.5, Qt.PenStyle.DashLine)
+            dash.setCosmetic(True)
+            painter.setPen(dash)
+            painter.setBrush(QColor(47, 125, 225, 30))
+            painter.drawRect(QRectF(QPointF(*self._shape_start), QPointF(*self._shape_end)).normalized())
         elif self._shape_start is not None and self._shape_end is not None:
             self._paint_stroke(painter, self._ink_stroke(
                 shape_points(self.shape, self._shape_start, self._shape_end)))
@@ -1138,6 +1191,35 @@ class InkCanvas(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(dash)
             painter.drawPolyline(QPolygonF([QPointF(*p) for p in self._lasso]))
+
+    def render_region(self, rect, scale=1.0):
+        """Paint paper, pictures and ink inside a document rectangle into a new image.
+
+        Selection frames, halos and live gestures are left out: the image shows
+        the page as stored. ``scale`` is image pixels per document unit.
+        """
+        rect = QRectF(rect)
+        if rect.width() <= 0 or rect.height() <= 0 or not scale > 0:
+            raise ValueError("Render needs a non-empty rectangle and a positive scale")
+        width = max(1, math.ceil(rect.width() * scale))
+        height = max(1, math.ceil(rect.height() * scale))
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.white)
+        painter = QPainter(image)
+        try:
+            painter.scale(scale, scale)
+            painter.translate(-rect.x(), -rect.y())
+            if self.paper == "grid" and self.GRID * scale >= 3:  # Denser lines would be a gray wash.
+                self._paint_grid(painter, rect)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            self._paint_images(painter, rect, self.note.images)
+            for stroke in self.note.strokes:
+                path, bounds = self._entry(stroke)
+                if bounds.adjusted(-5, -5, 5, 5).intersects(rect):
+                    self._paint_stroke(painter, stroke, path)
+        finally:
+            painter.end()
+        return image
 
     # Input events -----------------------------------------------------------
 
