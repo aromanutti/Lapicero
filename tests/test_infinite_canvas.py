@@ -718,3 +718,133 @@ def test_drag_release_repaints_where_the_selection_lands(stored, monkeypatch):
     mouse(stored, "release", x + 150, y)
     landed = stored._item_rect(stored.note.images[0])
     assert areas and areas[-1].contains(landed)
+
+
+def count_stroke_paints(canvas, monkeypatch):
+    calls = []
+    original = canvas._paint_stroke
+    monkeypatch.setattr(canvas, "_paint_stroke", lambda *args, **kwargs: (calls.append(1), original(*args, **kwargs))[1])
+    return calls
+
+
+def fresh_render(note, offset, zoom=1.0, paper="grid", selection=()):
+    other = InkCanvas(note)
+    other.resize(600, 400)
+    other.set_paper(paper)
+    other.set_zoom(zoom, QPointF(0, 0))
+    other.scroll_to(*offset)
+    other.selection = list(selection)
+    return render(other)
+
+
+def test_repainting_an_unchanged_page_reuses_cached_ink(canvas, monkeypatch):
+    canvas.set_note(Note(strokes=sentence()))
+    render(canvas)
+    calls = count_stroke_paints(canvas, monkeypatch)
+    render(canvas)
+    canvas.scroll_by(7.3, 4.6)
+    render(canvas)
+    canvas.scroll_by(-7.3, -4.6)
+    render(canvas)
+    assert calls == []  # Scrolling over settled ink only copies cached tiles.
+
+
+def test_cached_page_matches_a_fresh_render_after_edits(canvas):
+    words = sentence()
+    canvas.set_note(Note(strokes=list(words)))
+    canvas.scroll_to(13.3, 7.7)
+    render(canvas)
+    canvas.note.add_stroke(Stroke([(120, 220), (300, 240)], "#ff0000", 4))  # Appended ink.
+    assert render(canvas) == fresh_render(canvas.note, canvas.offset())
+    canvas.note.erase_where(lambda stroke: stroke is words[3])  # Removed ink.
+    assert render(canvas) == fresh_render(canvas.note, canvas.offset())
+    canvas.undo()
+    assert render(canvas) == fresh_render(canvas.note, canvas.offset())
+    canvas.selection = [words[5]]  # Halo appears...
+    assert render(canvas) == fresh_render(canvas.note, canvas.offset(), selection=[words[5]])
+    canvas.selection = []  # ...and goes.
+    assert render(canvas) == fresh_render(canvas.note, canvas.offset())
+    canvas.set_zoom(1.7, QPointF(0, 0))
+    canvas.scroll_to(13.3, 7.7)
+    assert render(canvas) == fresh_render(canvas.note, canvas.offset(), zoom=1.7)
+    canvas.set_paper("plain")
+    assert render(canvas) == fresh_render(canvas.note, canvas.offset(), zoom=1.7, paper="plain")
+
+
+def segment_distance(p, a, b):
+    ax, ay, bx, by = *a, *b
+    length = (bx - ax) ** 2 + (by - ay) ** 2
+    t = 0 if length == 0 else max(0, min(1, ((p[0] - ax) * (bx - ax) + (p[1] - ay) * (by - ay)) / length))
+    return math.dist(p, (ax + t * (bx - ax), ay + t * (by - ay)))
+
+
+def disc_union(samples):
+    """Exact reference: discs at samples joined by their tangent hulls.
+
+    Returns (inside, edge_distance) functions for a point.
+    """
+    from PySide6.QtGui import QPolygonF
+    hulls = []
+    for (a, ra), (b, rb) in zip(samples, samples[1:]):
+        d = math.dist(a, b)
+        if d > abs(ra - rb):
+            theta, phi = math.atan2(b[1] - a[1], b[0] - a[0]), math.acos((ra - rb) / d)
+            hulls.append([(c[0] + r * math.cos(theta + s * phi), c[1] + r * math.sin(theta + s * phi))
+                          for c, r, s in ((a, ra, 1), (b, rb, 1), (b, rb, -1), (a, ra, -1))])
+    polygons = [QPolygonF([QPointF(*q) for q in hull]) for hull in hulls]
+
+    def inside(p):
+        return (any(math.dist(p, c) <= r for c, r in samples)
+                or any(polygon.containsPoint(QPointF(*p), Qt.FillRule.OddEvenFill) for polygon in polygons))
+
+    def edge_distance(p):
+        discs = min(abs(math.dist(p, c) - r) for c, r in samples)
+        edges = min((segment_distance(p, h[0], h[1]) for h in hulls), default=math.inf)
+        others = min((segment_distance(p, h[2], h[3]) for h in hulls), default=math.inf)
+        return min(discs, edges, others)
+
+    return inside, edge_distance
+
+
+@pytest.mark.parametrize("points, pressures", [
+    ([(0, 0), (30, 0), (60, 0)], [.5, .5, .5]),  # Straight.
+    ([(0, 0), (20, 4), (30, 20), (25, 40), (5, 45)], [.1, .6, 1, .4, .05]),  # Curling, pressure swings.
+    ([(0, 0), (40, 0), (2, 3), (40, 8)], [.3, .9, .9, .3]),  # Hairpin reversals.
+    ([(0, 0), (1, 0), (1.5, .5), (30, 30)], [.05, 1, 1, .2]),  # Discs inside their neighbors.
+    ([(5, 5)], [.7]),  # A dot.
+])
+def test_pressure_outline_covers_the_disc_union(app, points, pressures):
+    from lapicero.model import pressure_width
+    from lapicero.qt_canvas import OUTLINE_TOLERANCE, outline_polygon, pressure_samples
+    if len(points) == 1:
+        samples = [(points[0], pressure_width(8, pressures[0]) / 2)]
+    else:
+        samples = pressure_samples(points, pressures, 8, 1, len(points) - 1)
+    outline = outline_polygon(samples)
+    reference, edge_distance = disc_union(samples)
+    xs = [c[0] for c, _ in samples]
+    ys = [c[1] for c, _ in samples]
+    reach = max(r for _, r in samples) + 1
+    step = .25
+    x = min(xs) - reach
+    while x <= max(xs) + reach:
+        y = min(ys) - reach
+        while y <= max(ys) + reach:
+            inside = outline.containsPoint(QPointF(x, y), Qt.FillRule.WindingFill)
+            if inside != reference((x, y)):
+                # Only within the polygon tolerance of an edge, and never outside the ink.
+                assert edge_distance((x, y)) <= OUTLINE_TOLERANCE + 1e-9 and not inside, (x, y)
+            y += step
+        x += step
+
+
+def test_opening_a_page_builds_only_visible_outlines(canvas, monkeypatch):
+    import lapicero.qt_canvas as qc
+    near = sentence(4)
+    far = [stroke.with_points([(x + 5000, y + 5000) for x, y in stroke.points]) for stroke in sentence(30)]
+    calls = []
+    original = qc.pressure_outline
+    monkeypatch.setattr(qc, "pressure_outline", lambda s: (calls.append(s), original(s))[1])
+    canvas.set_note(Note(strokes=near + far))
+    render(canvas)
+    assert len(calls) == len(near) and all(any(s is n for n in near) for s in calls)

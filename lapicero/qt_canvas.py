@@ -6,10 +6,14 @@ The view shows the document from ``offset`` (top-left, never negative) at
 
 import json
 import math
+import struct
+import sys
 import time
+from array import array
+from itertools import chain
 
-from PySide6.QtCore import (QBuffer, QIODevice, QMimeData, QPointF, QRectF, Qt, QEvent,
-                            QTimer, Signal)
+from PySide6.QtCore import (QBuffer, QByteArray, QDataStream, QIODevice, QMimeData, QPointF, QRectF, Qt,
+                            QEvent, QTimer, Signal)
 from PySide6.QtGui import (QColor, QCursor, QImage, QPainter, QPainterPath, QPainterPathStroker, QPen, QTransform,
                            QPixmap, QPointingDevice, QPolygonF)
 from PySide6.QtWidgets import QApplication, QGridLayout, QScrollBar, QWidget
@@ -70,20 +74,6 @@ def tip_cursor(color, diameter, ring=False):
 SELECTION_COLOR = "#2f7de1"
 
 
-def _signed_area(points):
-    return sum(ax * by - bx * ay for (ax, ay), (bx, by) in zip(points, points[1:] + points[:1])) / 2
-
-
-def _ellipse_orientation():
-    probe = QPainterPath()
-    probe.addEllipse(QPointF(0, 0), 1, 1)
-    points = [(probe.elementAt(i).x, probe.elementAt(i).y) for i in range(probe.elementCount())]
-    return 1 if _signed_area(points) >= 0 else -1
-
-
-ELLIPSE_ORIENTATION = _ellipse_orientation()
-
-
 def pressure_samples(points, pressures, width, first, last):
     """Discs (center, radius) along the smoothed curve of InkCanvas._path.
 
@@ -122,27 +112,107 @@ def new_outline_path():
     return path
 
 
-def add_outline(path, samples, first_disc=True):
-    """Add round discs at samples joined by tangent hulls.
+OUTLINE_TOLERANCE = .03  # Largest gap, in document units, between a round cap and its polygon.
 
-    All pieces share one orientation so the nonzero fill never cancels overlaps.
+
+INNER_PIVOT = .35  # Radians: sharper inner bends pivot on the disc center.
+
+
+def _arc(points, center, r, start, sweep):
+    """Append the arc after its start point: from angle start, turning by sweep."""
+    step = 2 * math.acos(max(-1.0, 1 - OUTLINE_TOLERANCE / r)) if r > OUTLINE_TOLERANCE else math.pi / 2
+    n = max(1, math.ceil(abs(sweep) / step))
+    cx, cy, cos, sin = center[0], center[1], math.cos, math.sin
+    for k in range(1, n + 1):
+        angle = start + sweep * k / n
+        points.append((cx + r * cos(angle), cy + r * sin(angle)))
+
+
+def _polygon(points):
+    """QPolygonF from (x, y) tuples, read in bulk: one QPointF per vertex from
+    Python cost more than all the outline math."""
+    coordinates = array("d", chain.from_iterable(points))
+    if sys.byteorder == "big":
+        coordinates.byteswap()
+    data = QByteArray(struct.pack("<I", len(points)) + coordinates.tobytes())  # Must outlive the stream.
+    stream = QDataStream(data, QIODevice.OpenModeFlag.ReadOnly)
+    stream.setByteOrder(QDataStream.ByteOrder.LittleEndian)
+    stream.setFloatingPointPrecision(QDataStream.FloatingPointPrecision.DoublePrecision)
+    polygon = QPolygonF()
+    stream >> polygon
+    return polygon
+
+
+def _turn(angle):
+    """An angle difference folded into (-pi, pi]."""
+    return angle - 2 * math.pi * math.ceil((angle - math.pi) / (2 * math.pi))
+
+
+def outline_polygon(samples):
+    """One closed polygon covering discs at samples joined by tangent hulls.
+
+    It follows the left tangents forward, around the last disc, back along the
+    right tangents and around the first disc, always turning the same way, with
+    round arcs on the outside of bends. Inside a bend the tangents cross and
+    loop with the same orientation, so the nonzero fill keeps them solid. One
+    polygon per stroke fills much faster than a union of hundreds of discs.
     """
-    for (a, ra), (b, rb) in zip(samples, samples[1:]):
-        d = math.dist(a, b)
-        if d <= abs(ra - rb) or d == 0:
-            continue  # One disc contains the other; the discs cover it.
-        theta = math.atan2(b[1] - a[1], b[0] - a[0])
-        phi = math.acos((ra - rb) / d)
-        hull = [(a[0] + ra * math.cos(theta + phi), a[1] + ra * math.sin(theta + phi)),
-                (b[0] + rb * math.cos(theta + phi), b[1] + rb * math.sin(theta + phi)),
-                (b[0] + rb * math.cos(theta - phi), b[1] + rb * math.sin(theta - phi)),
-                (a[0] + ra * math.cos(theta - phi), a[1] + ra * math.sin(theta - phi))]
-        if (1 if _signed_area(hull) >= 0 else -1) != ELLIPSE_ORIENTATION:
-            hull.reverse()
-        path.addPolygon(QPolygonF([QPointF(*q) for q in hull]))
-        path.closeSubpath()
-    for center, r in samples if first_disc else samples[1:]:
-        path.addEllipse(QPointF(*center), r, r)
+    kept = []
+    for center, r in samples:  # Drop discs inside a neighbor; their hulls are covered too.
+        if kept and math.dist(kept[-1][0], center) <= r - kept[-1][1]:
+            kept.pop()
+            while kept and math.dist(kept[-1][0], center) <= r - kept[-1][1]:
+                kept.pop()
+        if kept and math.dist(kept[-1][0], center) <= kept[-1][1] - r:
+            continue
+        kept.append((center, r))
+    if len(kept) == 1:
+        (center, r), = kept
+        points = [(center[0] + r, center[1])]
+        _arc(points, center, r, 0.0, -2 * math.pi)
+        return _polygon(points)
+    atan2, acos, dist, cos, sin = math.atan2, math.acos, math.dist, math.cos, math.sin
+    edges = [(atan2(b[1] - a[1], b[0] - a[0]), acos((ra - rb) / dist(a, b)))
+             for (a, ra), (b, rb) in zip(kept, kept[1:])]  # Tangent (theta, phi) per hull.
+    theta, phi = edges[0]
+    (cx, cy), r = kept[0]
+    left = [(cx + r * cos(theta + phi), cy + r * sin(theta + phi))]
+    right = [(cx + r * cos(theta - phi), cy + r * sin(theta - phi))]
+    last = len(kept) - 1
+    for i in range(1, last + 1):
+        (cx, cy), r = kept[i]
+        theta, phi = edges[i - 1]
+        left_in, right_in = theta + phi, theta - phi
+        left.append((cx + r * cos(left_in), cy + r * sin(left_in)))
+        right.append((cx + r * cos(right_in), cy + r * sin(right_in)))
+        if i == last:
+            break
+        theta, phi = edges[i]
+        # Outside a bend the tangents part: round it. Inside they cross and loop
+        # with the outline's own orientation, which stays filled; sharp inner
+        # bends pivot on the center, like a stroker's inner join.
+        for side, start, end, outward in ((left, left_in, theta + phi, -1), (right, right_in, theta - phi, 1)):
+            sweep = _turn(end - start)
+            if abs(sweep) * r <= OUTLINE_TOLERANCE:
+                continue  # Both tangents meet at one point, within tolerance.
+            if sweep * outward > 0:
+                _arc(side, (cx, cy), r, start, sweep)
+            else:
+                if -sweep * outward > INNER_PIVOT:
+                    side.append((cx, cy))
+                side.append((cx + r * cos(end), cy + r * sin(end)))
+    theta, phi = edges[-1]
+    _arc(left, kept[-1][0], kept[-1][1], theta + phi, -2 * phi)  # Around the end, to the right tangent.
+    left.extend(reversed(right[:-1]))
+    theta, phi = edges[0]
+    _arc(left, kept[0][0], kept[0][1], theta - phi, -(2 * math.pi - 2 * phi))  # Around the start, back.
+    return _polygon(left)
+
+
+def add_outline(path, samples):
+    """Add the closed outline of consecutive pressure samples to a path."""
+    path.addPolygon(outline_polygon(samples))
+    path.closeSubpath()
     return path
 
 
@@ -197,6 +267,8 @@ class InkCanvas(QWidget):
     MODES = ("pen", "eraser", "select", "shape", "ask")
     MIN_ASK_SIDE = 8.0  # Smallest ask rectangle side, in screen pixels.
     SHAPES = SHAPE_KINDS
+    TILE = 256  # Side of a cached page tile, in widget pixels.
+    MAX_TILES = 128  # Cached tiles kept; the farthest from the view are dropped first.
 
     def __init__(self, note=None, parent=None):
         super().__init__(parent)
@@ -232,6 +304,7 @@ class InkCanvas(QWidget):
         self._pan_from = None
         self._cache = {}
         self._centerlines = {}  # Halo paths of pressure strokes (see _centerline).
+        self._boxes = {}  # Culling bounds per stroke (see _box), without building outlines.
         self._paste_count = 0
         self._handle = None  # Grabbed selection handle (see HANDLES, or "rotate").
         # While dragging a selection, its cached ink is drawn through _drag_transform;
@@ -248,6 +321,14 @@ class InkCanvas(QWidget):
         # Optional Library-like object: store_image(bytes) -> key, image_path(key) -> Path.
         self.image_store = None
         self._pixmaps = {}
+        # Paper, pictures and settled ink, pre-rendered in TILE-sized squares of the
+        # zoomed document (see _sync_tiles). Repainting a page of pressure ink took
+        # ~200 ms, so scrolling, erasing and the toolbar fade lagged.
+        self._tiles = {}
+        self._tile_key = None
+        self._tile_strokes = ()
+        self._tile_images = ()
+        self._tile_excluded = frozenset()
         self._tablet_time = float("-inf")
         self._hold = QTimer(self)
         self._hold.setSingleShot(True)
@@ -789,13 +870,12 @@ class InkCanvas(QWidget):
         final = len(points) - 2
         if self._live is None:
             first = (points[0], pressure_width(width, pressures[0]) / 2)
-            self._live = [0, add_outline(new_outline_path(), [first]), first]
+            self._live = [0, add_outline(new_outline_path(), [first])]
         if self._live[0] < final:
-            samples = pressure_samples(points, pressures, width, self._live[0] + 1, final)
-            add_outline(self._live[1], samples, first_disc=False)
-            self._live[0], self._live[2] = final, samples[-1]
+            add_outline(self._live[1], pressure_samples(points, pressures, width, self._live[0] + 1, final))
+            self._live[0] = final
         tail = pressure_samples(points, pressures, width, final + 1, len(points) - 1)
-        return self._live[1], add_outline(new_outline_path(), tail, first_disc=False)
+        return self._live[1], add_outline(new_outline_path(), tail)
 
     def _add_point(self, point, pressure):
         self._points.append(point)
@@ -950,7 +1030,7 @@ class InkCanvas(QWidget):
         for i in range(steps + 1):
             x, y = start[0] + dx * i / steps, start[1] + dy * i / steps
             changed = self.note.erase_where(
-                lambda stroke: self._entry(stroke)[1].adjusted(-reach, -reach, reach, reach).contains(x, y)
+                lambda stroke: self._box(stroke).adjusted(-reach, -reach, reach, reach).contains(x, y)
                 and self._hits_rendered(stroke, x, y, reach)) or changed
         self._last_erase = point
         if changed:
@@ -990,6 +1070,18 @@ class InkCanvas(QWidget):
             entry = (stroke, path, bounds)
             self._cache[id(stroke)] = entry
         return entry[1:]
+
+    def _box(self, stroke):
+        """Generous bounds for culling, from the points alone: the smoothed curve
+        stays inside their box. Opening a page no longer builds every outline."""
+        entry = self._boxes.get(id(stroke))
+        if entry is None or entry[0] is not stroke:
+            xs, ys = [p[0] for p in stroke.points], [p[1] for p in stroke.points]
+            reach = ink_width(stroke) / 2 + 6  # Antialiased edge plus the usual 5 unit margin.
+            entry = (stroke, QRectF(min(xs) - reach, min(ys) - reach,
+                                    max(xs) - min(xs) + 2 * reach, max(ys) - min(ys) + 2 * reach))
+            self._boxes[id(stroke)] = entry
+        return entry[1]
 
     def _centerline(self, stroke):
         """Simple centre-line path for the halo. Stroking a pressure outline
@@ -1105,6 +1197,116 @@ class InkCanvas(QWidget):
         self.update(QRectF((rect.x() - self._ox) * self.zoom, (rect.y() - self._oy) * self.zoom,
                            rect.width() * self.zoom, rect.height() * self.zoom).toAlignedRect())
 
+    # Page tiles ---------------------------------------------------------------
+
+    def _origin(self):
+        """Whole-pixel view offset in the zoomed document, so tiles blit exactly."""
+        return round(self._ox * self.zoom), round(self._oy * self.zoom)
+
+    def _tile_rect(self, tx, ty):
+        size = self.TILE / self.zoom
+        return QRectF(tx * size, ty * size, size, size)
+
+    def _tile_painter(self, device, tx, ty):
+        painter = QPainter(device)
+        painter.translate(-tx * self.TILE, -ty * self.TILE)
+        painter.scale(self.zoom, self.zoom)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        return painter
+
+    def _cached_items(self):
+        """Ink and pictures drawn live instead: selected ink (its halo lies under
+        it) and, while dragging, the whole selection."""
+        dragging = self._drag_transform is not None
+        return frozenset(id(item) for item in self.selection if dragging or isinstance(item, Stroke))
+
+    def _render_tile(self, tx, ty, dpr):
+        pixmap = QPixmap(round(self.TILE * dpr), round(self.TILE * dpr))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.GlobalColor.white)
+        painter = self._tile_painter(pixmap, tx, ty)
+        rect = self._tile_rect(tx, ty)
+        if self.paper == "grid":
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            self._paint_grid(painter, rect)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        excluded = self._tile_excluded
+        self._paint_images(painter, rect, [i for i in self._tile_images if id(i) not in excluded])
+        for stroke in self._tile_strokes:
+            if id(stroke) not in excluded and self._box(stroke).intersects(rect):
+                self._paint_stroke(painter, stroke, self._entry(stroke)[0])
+        painter.end()
+        return pixmap
+
+    def _tiles_over(self, rect):
+        """Keys of cached tiles intersecting a document rectangle."""
+        size = self.TILE / self.zoom
+        pad = 2 / self.zoom  # Antialiased edges.
+        xs = range(math.floor((rect.left() - pad) / size), math.floor((rect.right() + pad) / size) + 1)
+        ys = range(math.floor((rect.top() - pad) / size), math.floor((rect.bottom() + pad) / size) + 1)
+        return [key for key in self._tiles if key[0] in xs and key[1] in ys]
+
+    def _item_bounds(self, item):
+        return self._box(item) if isinstance(item, Stroke) else self._item_rect(item)
+
+    def _sync_tiles(self, dpr):
+        """Bring cached tiles up to date with the note, by identity of its items.
+
+        Appended ink is drawn onto existing tiles; any other change drops only
+        the tiles under the items that came, went or changed live/cached side.
+        """
+        key = (self.zoom, self.paper, dpr, id(self.note), id(self.image_store))
+        strokes, images = tuple(self.note.strokes), tuple(self.note.images)
+        excluded = self._cached_items()
+        old_strokes, old_images = self._tile_strokes, self._tile_images
+        same = lambda a, b: len(a) == len(b) and all(x is y for x, y in zip(a, b))
+        if key != self._tile_key:
+            self._tiles.clear()
+        elif same(strokes, old_strokes) and same(images, old_images) and excluded == self._tile_excluded:
+            return
+        elif (excluded == self._tile_excluded and same(images, old_images)
+              and same(strokes[:len(old_strokes)], old_strokes)):
+            added = [s for s in strokes[len(old_strokes):] if id(s) not in excluded]
+            for stroke in added:
+                path, bounds = self._entry(stroke)
+                for tx, ty in self._tiles_over(bounds.adjusted(-5, -5, 5, 5)):
+                    painter = self._tile_painter(self._tiles[tx, ty], tx, ty)
+                    self._paint_stroke(painter, stroke, path)
+                    painter.end()
+        else:
+            old = {id(item): item for item in (*old_strokes, *old_images)}
+            new = {id(item): item for item in (*strokes, *images)}
+            changed = (old.keys() ^ new.keys()) | (excluded ^ self._tile_excluded)
+            if not changed:
+                self._tiles.clear()  # Same items, new order.
+            for identity in changed:
+                item = new.get(identity, old.get(identity))
+                if item is not None:
+                    for tile in self._tiles_over(self._item_bounds(item)):
+                        del self._tiles[tile]
+        self._tile_key, self._tile_strokes, self._tile_images = key, strokes, images
+        self._tile_excluded = excluded
+
+    def _paint_tiles(self, painter, area):
+        """Blit (rendering when missing) the tiles under a widget rectangle."""
+        dpr = self.devicePixelRatioF()
+        self._sync_tiles(dpr)
+        bx, by = self._origin()
+        size = self.TILE
+        xs = range((area.left() + bx) // size, (area.right() + bx) // size + 1)
+        ys = range((area.top() + by) // size, (area.bottom() + by) // size + 1)
+        for ty in ys:
+            for tx in xs:
+                tile = self._tiles.get((tx, ty))
+                if tile is None:
+                    tile = self._tiles[tx, ty] = self._render_tile(tx, ty, dpr)
+                painter.drawPixmap(tx * size - bx, ty * size - by, tile)
+        if len(self._tiles) > self.MAX_TILES:
+            cx, cy = (bx + self.width() / 2) / size, (by + self.height() / 2) / size
+            far = sorted(self._tiles, key=lambda k: (k[0] + .5 - cx) ** 2 + (k[1] + .5 - cy) ** 2)
+            for tile in far[self.MAX_TILES:]:
+                del self._tiles[tile]
+
     def _paint_grid(self, painter, visible):
         pen = QPen(QColor(GRID_COLOR))
         pen.setCosmetic(True)
@@ -1121,35 +1323,31 @@ class InkCanvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(event.rect(), Qt.GlobalColor.white)
+        area = event.rect()
+        live = {id(s) for s in self.note.strokes}
+        if len(self._cache) > len(live) + 256:
+            self._cache = {key: value for key, value in self._cache.items() if key in live}
+            self._centerlines = {key: value for key, value in self._centerlines.items() if key in live}
+            self._boxes = {key: value for key, value in self._boxes.items() if key in live}
+        self._paint_tiles(painter, area)
+        bx, by = self._origin()
+        painter.translate(-bx, -by)
         painter.scale(self.zoom, self.zoom)
-        painter.translate(-self._ox, -self._oy)
-        exposed = QRectF(event.rect().x() / self.zoom + self._ox, event.rect().y() / self.zoom + self._oy,
-                         event.rect().width() / self.zoom, event.rect().height() / self.zoom)
-        if self.paper == "grid":
-            self._paint_grid(painter, exposed)
+        exposed = QRectF((area.x() + bx) / self.zoom, (area.y() + by) / self.zoom,
+                         area.width() / self.zoom, area.height() / self.zoom)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         drag = self._drag_transform
         selected = {id(item) for item in self.selection}
-        hidden = selected if drag is not None else set()
-        self._paint_images(painter, exposed, [i for i in self.note.images if id(i) not in hidden])
         if drag is not None:
             # Pictures preview exactly as they will be committed (a skewing
             # transform would slant a rotated picture).
             self._paint_images(painter, exposed, [self._drag_rebuilt[id(i)] for i in self.selection
                                                   if isinstance(i, PlacedImage) and id(i) in self._drag_rebuilt])
-        live = {id(s) for s in self.note.strokes}
-        if len(self._cache) > len(live) + 256:
-            self._cache = {key: value for key, value in self._cache.items() if key in live}
-            self._centerlines = {key: value for key, value in self._centerlines.items() if key in live}
-        for stroke in self.note.strokes:
-            if id(stroke) in hidden:
-                continue
-            path, bounds = self._entry(stroke)
-            if bounds.adjusted(-5, -5, 5, 5).intersects(exposed):
-                if id(stroke) in selected:
+        elif selected:
+            for stroke in self.note.strokes:  # Selected ink is live: its halo lies under it.
+                if id(stroke) in selected and self._box(stroke).intersects(exposed):
                     self._paint_halo(painter, stroke, self._centerline(stroke))
-                self._paint_stroke(painter, stroke, path)
+                    self._paint_stroke(painter, stroke, self._entry(stroke)[0])
         if drag is not None:
             # Cached ink mapped through the drag: no stroke is rebuilt per pointer move.
             for stroke in self.selection:
