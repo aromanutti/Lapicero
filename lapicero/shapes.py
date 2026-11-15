@@ -146,6 +146,105 @@ def _arrow(points, diagonal):
     return "arrow", (tail, tip, wing1, tip, wing2)
 
 
+# Unit-box cubic Beziers (x right, y down) of a typeset-looking integral sign,
+# drawn top hook first: curl over to the stem, a slight slant, then curl under.
+_INTEGRAL_CURVES = (((.95, .10), (.90, -.02), (.62, -.04), (.56, .18)),
+                    ((.56, .18), (.52, .40), (.48, .60), (.44, .82)),
+                    ((.44, .82), (.38, 1.04), (.10, 1.02), (.05, .90)))
+
+
+def integral_points(left, top, right, bottom):
+    """A clean integral sign filling the box height, kept to a slender width."""
+    height = bottom - top
+    width = min(max(right - left, height * .22), height * .45)
+    x0 = (left + right) / 2 - width / 2
+    result = []
+    for index, (a, b, c, d) in enumerate(_INTEGRAL_CURVES):
+        for i in range(0 if index == 0 else 1, 13):
+            t = i / 12
+            u = 1 - t
+            x = u**3 * a[0] + 3 * u * u * t * b[0] + 3 * u * t * t * c[0] + t**3 * d[0]
+            y = u**3 * a[1] + 3 * u * u * t * b[1] + 3 * u * t * t * c[1] + t**3 * d[1]
+            result.append((x0 + x * width, top + y * height))
+    return tuple(result)
+
+
+def _integral(points):
+    """A tall stroke with a hook over the right at the top and under the left at the bottom."""
+    if points[0][1] > points[-1][1]:
+        points = points[::-1]  # Accept it drawn bottom to top.
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    left, right, top, bottom = min(xs), max(xs), min(ys), max(ys)
+    width, height = right - left, bottom - top
+    if height < 45 or not height * .12 <= width <= height * .7:
+        return None
+    apex = points[ys.index(top)]
+    base = points[ys.index(bottom)]
+    first, last = points[0], points[-1]
+    if not (first[0] - apex[0] > width * .08 and first[1] - top > height * .03
+            and base[0] - last[0] > width * .08 and bottom - last[1] > height * .03):
+        return None
+    # The stem between the hooks must run steadily down, not zigzag like a letter.
+    stem = [p for p in points if top + height * .25 <= p[1] <= bottom - height * .25]
+    if len(stem) < 2 or any(b[1] < a[1] - height * .02 for a, b in zip(stem, stem[1:])):
+        return None
+    if max(p[0] for p in stem) - min(p[0] for p in stem) > width * .6:
+        return None
+    return "integral", integral_points(left, top, right, bottom)
+
+
+def _line(points, path_length):
+    start, end = points[0], points[-1]
+    chord = _distance(start, end)
+    if chord < 45 or path_length > chord * 1.2:
+        return None
+    if max(_point_segment_distance(p, start, end) for p in points) > max(4.0, chord * .06):
+        return None
+    return "line", (start, end)
+
+
+def _ellipse(points):
+    """Fit one closed loop to a (possibly rotated) ellipse, or a circle when round."""
+    n = len(points)
+    mx, my = sum(p[0] for p in points) / n, sum(p[1] for p in points) / n
+    sxx = sum((p[0] - mx) ** 2 for p in points) / n
+    syy = sum((p[1] - my) ** 2 for p in points) / n
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in points) / n
+    spread = math.hypot(sxx - syy, 2 * sxy)
+    # Near-isotropic loops have no stable principal axis; stay axis-aligned.
+    small, large = (sxx + syy - spread) / 2, (sxx + syy + spread) / 2
+    angle = .5 * math.atan2(2 * sxy, sxx - syy) if large and small / large < .72 else 0.0
+    ux, uy = math.cos(angle), math.sin(angle)
+    local = [((p[0] - mx) * ux + (p[1] - my) * uy, -(p[0] - mx) * uy + (p[1] - my) * ux) for p in points]
+    us, vs = [q[0] for q in local], [q[1] for q in local]
+    a, b = (max(us) - min(us)) / 2, (max(vs) - min(vs)) / 2
+    if min(a, b) < 20:
+        return None
+    cu, cv = (max(us) + min(us)) / 2, (max(vs) + min(vs)) / 2
+    cx, cy = mx + cu * ux - cv * uy, my + cu * uy + cv * ux
+    area = abs(sum(_cross(_sub(p, (cx, cy)), _sub(q, (cx, cy))) for p, q in zip(points, points[1:]))) / 2
+    if not .72 < area / (math.pi * a * b) < 1.29:
+        return None
+    radii = [math.hypot((u - cu) / a, (v - cv) / b) for u, v in local]
+    if max(abs(r - 1) for r in radii) >= .23 or sum(abs(r - 1) for r in radii) / n >= .095:
+        return None
+    if min(a, b) / max(a, b) >= .85:
+        a = b = (a + b) / 2
+        kind = "circle"
+    else:
+        kind = "ellipse"
+    phase = math.atan2(points[0][1] - cy, points[0][0] - cx) - angle
+    winding = sum(_cross(_sub(p, (cx, cy)), _sub(q, (cx, cy))) for p, q in zip(points, points[1:]))
+    direction = 1 if winding >= 0 else -1
+    clean = []
+    for i in range(ELLIPSE_SEGMENTS + 1):
+        t = phase + direction * 2 * math.pi * i / ELLIPSE_SEGMENTS
+        x, y = a * math.cos(t), b * math.sin(t)
+        clean.append((cx + x * ux - y * uy, cy + x * uy + y * ux))
+    clean[-1] = clean[0]
+    return kind, tuple(clean)
+
+
 def normalize_shape(points):
     """Return (kind, clean points), or None when ink should remain untouched."""
     points = tuple(tuple(p) for p in points)
@@ -161,22 +260,12 @@ def normalize_shape(points):
     if path_length > diagonal * 6:
         return None
     if _distance(points[0], points[-1]) > diagonal * .18:
-        return _arrow(points, diagonal)
+        return _integral(points) or _line(points, path_length) or _arrow(points, diagonal)
     if min(width, height) < 45 or path_length < diagonal * 2.0:
         return None
-    cx, cy = (left + right) / 2, (top + bottom) / 2
-    radius = (width + height) / 4
-    radii = [_distance(p, (cx, cy)) for p in points]
-    winding = sum(_cross(_sub(a, (cx, cy)), _sub(b, (cx, cy))) for a, b in zip(points, points[1:]))
-    if (min(width, height) / max(width, height) > .80
-            and 4.5 < abs(winding) / radius**2 < 8.1
-            and max(abs(r - radius) for r in radii) < radius * .23
-            and sum(abs(r - radius) for r in radii) / len(radii) < radius * .095):
-        phase = math.atan2(points[0][1] - cy, points[0][0] - cx)
-        direction = 1 if winding >= 0 else -1
-        clean = tuple((cx + radius * math.cos(phase + direction * 2 * math.pi * i / 48),
-                       cy + radius * math.sin(phase + direction * 2 * math.pi * i / 48)) for i in range(49))
-        return "circle", clean
+    ellipse = _ellipse(points)
+    if ellipse is not None:
+        return ellipse
     return _polygon(points, diagonal)
 
 
@@ -214,3 +303,86 @@ def shape_points(kind, start, end):
                       for side in (math.radians(28), -math.radians(28)))
         return (start, end, wings[0], end, wings[1])
     raise ValueError(f"Unknown shape: {kind}")
+
+
+CLOSED_KINDS = ("circle", "ellipse", "triangle", "square", "rectangle")
+
+
+def edit_shape(kind, points, anchor, target):
+    """Rotate and scale a recognized shape so the pen's hold point follows the pen.
+
+    Lines and arrows pivot on their tail, so dragging changes length and
+    direction; closed outlines pivot on their center and grow, shrink or turn.
+    Arrow heads keep their size instead of scaling with the shaft.
+    """
+    points = tuple(tuple(p) for p in points)
+    if kind in ("line", "arrow"):
+        pivot = complex(*points[0])
+    else:
+        ring = points[:-1] if points[0] == points[-1] else points
+        pivot = complex(sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring))
+    origin = complex(*anchor) - pivot
+    if abs(origin) < 1e-6:
+        return points
+    factor = (complex(*target) - pivot) / origin
+    if abs(factor) < 1e-3:
+        factor = factor / abs(factor) * 1e-3 if factor else 1e-3
+    def move(p):
+        z = pivot + (complex(*p) - pivot) * factor
+        return (z.real, z.imag)
+    if kind != "arrow":
+        return tuple(move(p) for p in points)
+    tail, tip = points[0], points[1]
+    turn = factor / abs(factor) * min(1.0, abs(factor))
+    new_tip = complex(*move(tip))
+    wings = [new_tip + (complex(*w) - complex(*tip)) * turn for w in (points[2], points[4])]
+    new_tip = (new_tip.real, new_tip.imag)
+    return (tail, new_tip, (wings[0].real, wings[0].imag), new_tip, (wings[1].real, wings[1].imag))
+
+
+DIAGRAM_KINDS = ("axes_xy", "axes_xyz", "integral")
+
+
+def _letter(char, center, size):
+    """Hand-lettered axis label as straight strokes, ``size`` being its half height."""
+    cx, cy = center
+    s = size
+    if char == "x":
+        return (((cx - s, cy - s), (cx + s, cy + s)), ((cx + s, cy - s), (cx - s, cy + s)))
+    if char == "y":
+        return (((cx - s, cy - s), (cx, cy)), ((cx + s, cy - s), (cx - s * .5, cy + s)))
+    if char == "z":
+        return (((cx - s, cy - s), (cx + s, cy - s), (cx - s, cy + s), (cx + s, cy + s)),)
+    raise ValueError(f"No strokes for label: {char}")
+
+
+def diagram_strokes(kind, start, end, labels=True):
+    """Engineering diagrams dragged over the box from start to end, as several strokes.
+
+    ``axes_xy`` puts the origin at the box's lower left with X to the right and
+    Y up. ``axes_xyz`` is an oblique right-handed frame: Z up, Y right and X
+    toward the viewer (lower left). Each axis is an arrow labeled at its tip.
+    """
+    (x0, y0), (x1, y1) = start, end
+    left, right, top, bottom = min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+    width, height = right - left, bottom - top
+    if kind == "integral":
+        return (integral_points(left, top, right, bottom),)
+    if kind == "axes_xy":
+        origin = (left, bottom)
+        tips = (("x", (right, bottom)), ("y", (left, top)))
+    elif kind == "axes_xyz":
+        origin = (left + width * .4, top + height * .6)
+        tips = (("x", (left, bottom)), ("y", (right, origin[1])), ("z", (origin[0], top)))
+    else:
+        raise ValueError(f"Unknown diagram: {kind}")
+    strokes = [shape_points("arrow", origin, tip) for _, tip in tips]
+    if labels:
+        size = max(4.0, min(10.0, min(width, height) * .06 or max(width, height) * .06))
+        for char, tip in tips:
+            dx, dy = tip[0] - origin[0], tip[1] - origin[1]
+            length = math.hypot(dx, dy) or 1
+            # Just past the tip, along the axis, clear of the arrow head.
+            center = (tip[0] + dx / length * size * 2.2, tip[1] + dy / length * size * 2.2)
+            strokes.extend(_letter(char, center, size))
+    return tuple(strokes)

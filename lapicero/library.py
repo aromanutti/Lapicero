@@ -234,6 +234,12 @@ class Library:
         self.subjects.append(subject)
         return subject
 
+    def delete_subject(self, identifier):
+        """Remove a subject with all of its sections and pages; return it."""
+        subject = self.subject(identifier)
+        self.subjects.remove(subject)
+        return subject
+
     def create_section(self, subject_id, name):
         subject = self.subject(subject_id)
         section = Section(uuid4().hex, _name(name))

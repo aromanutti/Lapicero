@@ -471,6 +471,19 @@ def test_picture_edge_stretch_and_rotation(stored):
     assert stored.selection == [rotated]
 
 
+def test_axes_are_one_undo_step_and_stay_selected(canvas):
+    canvas.set_mode("shape")
+    canvas.set_shape("axes_xy")
+    drag(canvas, (100, 100), (260, 220))
+    strokes = canvas.note.strokes
+    assert len(strokes) == 6  # Two arrows, then the strokes of "x" and "y".
+    assert strokes[0].points[:2] == ((100, 220), (260, 220))
+    assert strokes[1].points[:2] == ((100, 220), (100, 100))
+    assert canvas.selection == strokes
+    assert canvas.undo() and canvas.note.strokes == []
+    canvas.set_mode("pen")
+
+
 def test_new_shape_stays_selected_and_handles_work_without_lasso(canvas):
     canvas.set_mode("shape")
     canvas.set_shape("rectangle")

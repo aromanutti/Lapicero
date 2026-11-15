@@ -258,15 +258,55 @@ def test_hold_preview_quick_release_move_cancellation_and_exact_paths(canvas):
     path = canvas._path(Stroke(clean))
     assert all(path.elementAt(i).type != QPainterPath.ElementType.CurveToElement
                for i in range(path.elementCount()))
-    mouse(canvas, "move", 21, 21)
-    assert canvas._snapped is None and canvas._points == points + [(21, 21)]
-    mouse(canvas, "release", 21, 21)
-    assert canvas.note.strokes[-1].points == tuple(points + [(21, 21)])
-    trace()
-    QTest.qWait(650)
     mouse(canvas, "release", *points[-1])
     assert canvas.note.strokes[-1].points == clean
-    assert canvas.undo() and canvas.note.strokes[-1].points[-1] == (21, 21)
+    assert canvas.undo() and canvas.note.strokes[-1].points == tuple(points)
+
+
+def _rectangle_points():
+    rectangle = [(20, 20), (170, 20), (170, 100), (20, 100), (20, 20)]
+    points = []
+    for a, b in zip(rectangle, rectangle[1:]):
+        points += [(a[0] + (b[0] - a[0]) * i / 8, a[1] + (b[1] - a[1]) * i / 8) for i in range(8)]
+    return points + [rectangle[-1]]
+
+
+def _center(points):
+    ring = points[:-1]
+    return sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+
+
+def test_holding_a_snapped_shape_resizes_it_around_its_center(canvas):
+    points = _rectangle_points()
+    mouse(canvas, "press", *points[0])
+    for point in points[1:]:
+        mouse(canvas, "move", *point)
+    QTest.qWait(650)
+    clean = canvas._snapped
+    cx, cy = _center(clean)
+    far = (cx + (20 - cx) * 1.5, cy + (20 - cy) * 1.5)  # Pull the held corner outward.
+    mouse(canvas, "move", *far)
+    assert canvas._points == points  # Editing never adds freehand ink.
+    mouse(canvas, "release", *far)
+    edited = canvas.note.strokes[-1].points
+    assert len(edited) == len(clean) and edited[0] == edited[-1]
+    assert _center(edited) == pytest.approx((cx, cy), abs=1e-6)
+    width = lambda shape: max(p[0] for p in shape) - min(p[0] for p in shape)
+    assert width(edited) == pytest.approx(width(clean) * 1.5, rel=1e-6)
+    assert canvas.undo() and canvas.note.strokes == []
+
+
+def test_holding_a_snapped_line_changes_its_length_and_direction(canvas):
+    points = [(30 + 4 * i, 40) for i in range(41)]  # A held 160 px stroke.
+    mouse(canvas, "press", *points[0])
+    for point in points[1:]:
+        mouse(canvas, "move", *point)
+    QTest.qWait(650)
+    assert canvas._snapped == ((30, 40), (190, 40))
+    mouse(canvas, "move", 30, 240)
+    mouse(canvas, "release", 30, 240)
+    stroke = canvas.note.strokes[-1].points
+    assert stroke[0] == pytest.approx((30, 40)) and stroke[-1] == pytest.approx((30, 240))
 
 
 def test_arrow_geometry_remains_straight(canvas):

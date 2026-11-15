@@ -43,6 +43,84 @@ def populate(window, monkeypatch):
     return subject, subject.sections[0], subject.sections[0].pages[0]
 
 
+def view_rect(window):
+    """The canvas view's rectangle in the central widget, where the floating toolbar lives."""
+    from PySide6.QtCore import QPoint, QRect
+    return QRect(window.view.mapTo(window.centralWidget(), QPoint(0, 0)), window.view.size())
+
+
+def test_search_filters_the_tree_and_keeps_ancestors(window, monkeypatch):
+    populate(window, monkeypatch)
+    names(monkeypatch, "Optics")
+    window.tree.setCurrentItem(window.tree.topLevelItem(0).child(0))
+    window.new_page()
+    subject = window.tree.topLevelItem(0)
+    section = subject.child(0)
+    window.search.setText("opt")
+    assert not subject.isHidden() and not section.isHidden()
+    assert section.child(0).isHidden() and not section.child(1).isHidden()
+    window.search.clear()
+    assert not any(section.child(i).isHidden() for i in range(section.childCount()))
+
+
+def test_settings_dialog_mirrors_ask_panel_choices(window):
+    dialog = window.settings_dialog
+    window.show_settings()
+    assert dialog.isVisible()
+    dialog.model_choice.setCurrentIndex(dialog.model_choice.findData("opus"))
+    assert window.ask_model_combo.currentData() == "opus"
+    window.ask_effort_combo.setCurrentIndex(window.ask_effort_combo.findData("high"))
+    assert dialog.effort_choice.currentData() == "high"
+    dialog.accept()
+
+
+def test_language_choice_is_saved_for_the_next_start(window, qt, tmp_path):
+    from lapicero import i18n
+    dialog = window.settings_dialog
+    assert window.language == "en" and dialog.language_choice.currentData() == "en"
+    dialog.language_choice.setCurrentIndex(dialog.language_choice.findData("es"))
+    settings = json.loads((tmp_path / "folder" / "ui.json").read_text(encoding="utf-8"))
+    assert settings["language"] == "es"
+    assert window.settings_button.text() == "Settings"  # This window keeps its language.
+
+    spanish = LapiceroWindow(library_path=tmp_path / "folder" / "library.json", autosave_delay_ms=0)
+    try:
+        assert spanish.language == "es" and i18n.language() == "es"
+        assert spanish.settings_button.text() == "Configuración"
+        assert spanish.search.placeholderText() == "Buscar páginas"
+        assert spanish.settings_dialog.windowTitle() == "Configuración"
+        assert spanish.settings_dialog.language_choice.currentData() == "es"
+        assert spanish.ask_prompt.send_button.text() == "Enviar"
+        assert spanish.ask_model_combo.itemText(0) == "Predeterminado de Claude Code"
+        assert spanish.ask_model_combo.itemData(0) is None  # Values stay untranslated.
+    finally:
+        spanish.library._saved = spanish.library._data()
+        spanish.close()
+        i18n.set_language("en")
+
+
+def test_tr_translates_fills_and_falls_back():
+    from lapicero import i18n
+    try:
+        assert i18n.set_language("xx") == "en"
+        assert i18n.tr("Saved") == "Saved"
+        i18n.set_language("es")
+        assert i18n.tr("Saved") == "Guardado"
+        assert i18n.tr("All changes saved to {path}", path="a.json") == "Todos los cambios se guardaron en a.json"
+        assert i18n.tr("Untranslated text") == "Untranslated text"
+    finally:
+        i18n.set_language("en")
+
+
+def test_zoom_pill_zooms_and_resets(window, monkeypatch):
+    populate(window, monkeypatch)
+    plus = [b for b in window.zoom_pill.findChildren(type(window.zoom_label)) if b.text() == "+"][0]
+    plus.click()
+    assert window.canvas.zoom == pytest.approx(1.25) and window.zoom_label.text() == "125%"
+    window.zoom_label.click()
+    assert window.canvas.zoom == 1.0 and window.zoom_label.text() == "100%"
+
+
 def tap(window, x=40, y=50):
     from PySide6.QtCore import QPointF, QEvent
     from PySide6.QtGui import QMouseEvent
@@ -58,21 +136,24 @@ def test_create_rename_select_visible_controls_and_infinite_view(window, monkeyp
     assert not window.canvas.isEnabled() and not window.canvas.isVisible()
     assert window.placeholder.isVisible()
     assert window.canvas.minimumSize() != window.canvas.maximumSize()
-    assert not window.new_page_button.isEnabled() and not window.import_button.isEnabled()
-    assert not window.undo_button.isEnabled()
+    assert not window.new_page_action.isEnabled() and not window.import_button.isEnabled()
+    assert not window.import_action.isEnabled() and not window.undo_button.isEnabled()
     subject, section, page = populate(window, monkeypatch)
     assert window.canvas.isEnabled() and window.canvas.isVisible()
     assert window._page_id == page.id
     assert window.library.path.exists()
     assert window.tree.topLevelItem(0).child(0).child(0).text(0) == "Page 1"
-    assert all(button.isVisible() for button in (window.new_subject_button, window.new_section_button,
-               window.new_page_button, window.rename_button, window.import_button, window.pen_button,
-               window.eraser_button, window.undo_button, window.redo_button, window.select_button,
-               window.shape_button, window.fullscreen_button, window.paper_combo, window.size_combo,
-               *window.pen_buttons))
+    assert all(button.isVisible() for button in (window.new_button, window.search, window.import_button,
+               window.settings_button, window.pen_button, window.eraser_button, window.undo_button,
+               window.redo_button, window.select_button, window.shape_button, window.ask_button,
+               window.fullscreen_button, window.paper_combo, *window.pen_buttons))
+    assert all(action.isEnabled() for action in (window.new_subject_action, window.new_section_action,
+               window.new_page_action, window.rename_action, window.import_action))
+    assert window.new_section_action.text() == "New subsection"  # A page inside a section is selected.
+    assert window.settings_dialog.isAncestorOf(window.size_combo) and not window.settings_dialog.isVisible()
     for setting in (window.paper_combo, window.size_combo):
-        assert window.settings_box.isAncestorOf(setting) and window.sidebar.isAncestorOf(setting)
-        assert not window.toolbar.isAncestorOf(setting)
+        assert not window.toolbar.isAncestorOf(setting) and not window.sidebar.isAncestorOf(setting)
+    assert all(name in window.breadcrumb.text() for name in ("Physics", "Vectors", "Page 1"))
     assert all(not button.icon().isNull() for button in window.pen_buttons)
     assert not window.placeholder.isVisible()
     names(monkeypatch, "Renamed page", "Renamed section", "Renamed subject")
@@ -83,7 +164,7 @@ def test_create_rename_select_visible_controls_and_infinite_view(window, monkeyp
     window.rename_selected()
     assert (subject.name, section.name, page.name) == ("Renamed subject", "Renamed section", "Renamed page")
     assert not window.canvas.isEnabled()
-    assert not window.new_page_button.isEnabled()
+    assert not window.new_page_action.isEnabled()
     window.tree.setCurrentItem(window.tree.topLevelItem(0).child(0).child(0))
     assert window.canvas.note is page.note
     reopened = Library.load(window.library.path)
@@ -374,6 +455,17 @@ def test_shape_menu_selects_kind_and_mode(window, monkeypatch):
     assert window.shape_button.isChecked()
 
 
+def test_engineering_menu_draws_axes_and_shapes_button_keeps_its_kind(window, monkeypatch):
+    populate(window, monkeypatch)
+    window.diagram_actions["axes_xyz"].trigger()
+    assert window.canvas.mode == "shape" and window.canvas.shape == "axes_xyz"
+    assert window.diagram_button.isChecked() and not window.shape_button.isChecked()
+    window.shape_button.click()
+    assert window.canvas.shape == "rectangle" and window.shape_button.isChecked()
+    window.diagram_button.click()
+    assert window.canvas.shape == "axes_xyz"
+
+
 def test_paper_choice_is_per_page_and_persisted(window, monkeypatch):
     _, section, first = populate(window, monkeypatch)
     assert first.paper == "grid" and window.paper_combo.currentData() == "grid" and window.canvas.paper == "grid"
@@ -393,9 +485,20 @@ def test_fullscreen_toggle_hides_sidebar_and_escape_leaves(window, monkeypatch, 
     window.fullscreen_button.click()
     qt.processEvents()
     assert window.isFullScreen() and not window.sidebar.isVisible()
+    # The page fills the screen: no header, no margins, no card border.
+    assert not window.header.isVisible() and window.exit_fullscreen_button.isVisible()
+    assert view_rect(window).top() == 0 and view_rect(window).left() == 0
+    assert window.view.mask().isEmpty()
     window._escape()
     qt.processEvents()
     assert not window.isFullScreen() and window.sidebar.isVisible()
+    assert window.header.isVisible() and not window.exit_fullscreen_button.isVisible()
+    assert not window.view.mask().isEmpty()
+    window.fullscreen_button.click()
+    qt.processEvents()
+    window.exit_fullscreen_button.click()
+    qt.processEvents()
+    assert not window.isFullScreen() and window.header.isVisible()
     window.sidebar_button.click()
     assert not window.sidebar.isVisible()
 
@@ -435,14 +538,15 @@ def test_floating_compact_toolbar_and_no_status_bar(window, monkeypatch, qt):
     window.resize(1400, 900)
     qt.processEvents()
     assert window.findChild(QStatusBar) is None and window.findChild(QToolBar) is None
-    bar, view = window.toolbar, window.view.geometry()
+    bar, view = window.toolbar, view_rect(window)
     assert bar.isVisible() and bar.width() < view.width() * 0.75
     assert abs(bar.geometry().center().x() - view.center().x()) <= 1
     assert view.top() <= bar.y() <= view.top() + 12
-    assert window.status.text() == "Saved" and window.status.parent() is bar
+    assert window.status.text() == "Saved" and not bar.isAncestorOf(window.status)
+    assert window.zoom_pill.isVisible() and view.contains(window.zoom_pill.geometry())
     window.sidebar_button.click()
     qt.processEvents()
-    assert abs(window.toolbar.geometry().center().x() - window.view.geometry().center().x()) <= 1
+    assert abs(window.toolbar.geometry().center().x() - view_rect(window).center().x()) <= 1
 
 
 def test_toolbar_size_cycles_stays_centered_and_is_remembered(window, monkeypatch, qt, tmp_path):
@@ -456,7 +560,7 @@ def test_toolbar_size_cycles_stays_centered_and_is_remembered(window, monkeypatc
         qt.processEvents()
         assert window.toolbar_size == expected
         widths[expected] = window.toolbar.width()
-        assert abs(window.toolbar.geometry().center().x() - window.view.geometry().center().x()) <= 1
+        assert abs(window.toolbar.geometry().center().x() - view_rect(window).center().x()) <= 1
     assert widths["small"] < widths["medium"] < widths["large"]
     assert window.pen_button.iconSize().width() == 44
     again = LapiceroWindow(library_path=window.library.path)
@@ -594,9 +698,9 @@ def test_new_section_on_a_section_creates_a_nested_subsection(window, monkeypatc
 
 def test_delete_section_asks_first_and_closes_its_open_page(window, monkeypatch):
     subject, section, page = populate(window, monkeypatch)
-    assert not window.delete_section_button.isEnabled()  # A page is selected.
+    assert not window.delete_section_action.isEnabled()  # A page is selected.
     window.tree.setCurrentItem(window.tree.topLevelItem(0).child(0))
-    assert window.delete_section_button.isEnabled() and window.delete_section_button.isVisible()
+    assert window.delete_section_action.isEnabled()
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
     window.delete_section()
     assert subject.sections == [section]
@@ -609,3 +713,35 @@ def test_delete_section_asks_first_and_closes_its_open_page(window, monkeypatch)
     assert window._page_id is None and not window.canvas.isEnabled()
     assert window._selected() == ("subject", subject.id)
     assert Library.load(window.library.path).subjects[0].sections == []
+
+
+def test_app_logo_ships_as_a_multi_size_ico(qt, tmp_path):
+    from PySide6.QtGui import QIcon
+
+    from lapicero import icons
+
+    assert not icons.app_icon().isNull()
+    written = icons.write_app_ico(tmp_path / "logo.ico")
+    data = written.read_bytes()
+    assert data[:4] == b"\x00\x00\x01\x00"
+    assert int.from_bytes(data[4:6], "little") == len(icons.APP_ICON_SIZES)
+    assert not QIcon(str(icons.APP_ICON_PATH)).isNull()
+
+
+def test_delete_subject_asks_first_and_closes_its_open_page(window, monkeypatch):
+    subject, section, page = populate(window, monkeypatch)
+    window.tree.setCurrentItem(window.tree.topLevelItem(0))
+    assert window.delete_section_action.isEnabled()
+    assert window.delete_section_action.text() == "Delete subject…"
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    window.delete_section_action.trigger()
+    assert window.library.subjects == [subject]
+    window.tree.setCurrentItem(window.tree.topLevelItem(0).child(0).child(0))
+    assert window._page_id == page.id
+    window.tree.setCurrentItem(window.tree.topLevelItem(0))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    window.delete_section_action.trigger()
+    assert window.library.subjects == []
+    assert window._page_id is None and not window.canvas.isEnabled()
+    assert window.tree.topLevelItemCount() == 0
+    assert Library.load(window.library.path).subjects == []

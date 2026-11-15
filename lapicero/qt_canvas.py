@@ -19,7 +19,7 @@ from PySide6.QtGui import (QColor, QCursor, QImage, QPainter, QPainterPath, QPai
 from PySide6.QtWidgets import QApplication, QGridLayout, QScrollBar, QWidget
 
 from .model import Note, NoteFormatError, PlacedImage, Stroke, pressure_width
-from .shapes import SHAPE_KINDS, normalize_shape, shape_points
+from .shapes import DIAGRAM_KINDS, SHAPE_KINDS, diagram_strokes, edit_shape, normalize_shape, shape_points
 
 
 GRID_COLOR = "#cfe2f3"
@@ -72,6 +72,7 @@ def tip_cursor(color, diameter, ring=False):
     painter.end()
     return QCursor(pixmap, side // 2, side // 2)
 SELECTION_COLOR = "#2f7de1"
+ASK_COLOR = "#2f4fd8"  # The theme accent: the region a question is about.
 
 
 def pressure_samples(points, pressures, width, first, last):
@@ -267,6 +268,7 @@ class InkCanvas(QWidget):
     MODES = ("pen", "eraser", "select", "shape", "ask")
     MIN_ASK_SIDE = 8.0  # Smallest ask rectangle side, in screen pixels.
     SHAPES = SHAPE_KINDS
+    DIAGRAMS = DIAGRAM_KINDS  # Engineering elements: drawn like shapes, as several strokes.
     TILE = 256  # Side of a cached page tile, in widget pixels.
     MAX_TILES = 128  # Cached tiles kept; the farthest from the view are dropped first.
 
@@ -294,6 +296,7 @@ class InkCanvas(QWidget):
         self._ink_color = None
         self._ink_width = None
         self._snapped = None
+        self._snap = None  # (kind, clean points, pen point) while a snapped shape is held.
         self._source = None
         self._last_erase = None
         self._erase_changed = False
@@ -301,6 +304,8 @@ class InkCanvas(QWidget):
         self._move_from = None
         self._shape_start = None
         self._shape_end = None
+        self._shape_extra = []  # Strokes after the first of a multi-stroke diagram.
+        self.pending_region = None  # Ask tool: region kept marked while its question is typed.
         self._pan_from = None
         self._cache = {}
         self._centerlines = {}  # Halo paths of pressure strokes (see _centerline).
@@ -365,9 +370,14 @@ class InkCanvas(QWidget):
             self.setCursor(tip_cursor(self.pen_color, self.pen_width * self.zoom))
 
     def set_shape(self, shape):
-        if shape not in self.SHAPES:
+        if shape not in self.SHAPES + self.DIAGRAMS:
             raise ValueError("Unknown shape")
         self.shape = shape
+
+    def _shape_polylines(self, start, end):
+        if self.shape in self.DIAGRAMS:
+            return diagram_strokes(self.shape, start, end)
+        return (shape_points(self.shape, start, end),)
 
     def set_paper(self, paper):
         if paper not in ("plain", "grid"):
@@ -396,6 +406,15 @@ class InkCanvas(QWidget):
 
     def offset(self):
         return (self._ox, self._oy)
+
+    def to_widget(self, rect):
+        """Widget rectangle of a document rectangle at the current scroll and zoom."""
+        return QRectF((rect.x() - self._ox) * self.zoom, (rect.y() - self._oy) * self.zoom,
+                      rect.width() * self.zoom, rect.height() * self.zoom)
+
+    def set_pending_region(self, region):
+        self.pending_region = QRectF(region) if region is not None else None
+        self.update()
 
     def scroll_to(self, x, y):
         x, y = max(0.0, float(x)), max(0.0, float(y))
@@ -802,6 +821,7 @@ class InkCanvas(QWidget):
                      [mapping.get(id(i), i) for i in note.images])
             self.selection = dragged
         new_shape = self._gesture == "shape"
+        extra = [self._ink_stroke(points) for points in self._shape_extra] if stroke is not None else []
         ink_only = self._gesture == "pen" and moved is None
         # The live preview may differ from the committed ink (a snapped shape).
         drawn = (QPolygonF([QPointF(*q) for q in self._points]).boundingRect()
@@ -809,9 +829,10 @@ class InkCanvas(QWidget):
         self._stop_gesture(repaint=not ink_only and dragged_area is None)
         if dragged_area is not None:
             self._update_area(dragged_area)
-        if stroke is not None and note.add_stroke(stroke):
+        if stroke is not None and (note.replace([*note.strokes, stroke, *extra]) if extra
+                                   else note.add_stroke(stroke)):
             if new_shape and note is self.note:
-                self.selection = [stroke]  # Show the frame and handles right away.
+                self.selection = [stroke, *extra]  # Show the frame and handles right away.
             self.changed.emit()
         if ink_only:
             # Only the new ink changed; repainting a full page per stroke lagged.
@@ -833,6 +854,7 @@ class InkCanvas(QWidget):
         self._pressures = None
         self._live = None
         self._snapped = None
+        self._snap = None
         self._source = None
         self._last_erase = None
         self._lasso = None
@@ -846,6 +868,7 @@ class InkCanvas(QWidget):
         self._drag_scaling = False
         self._shape_start = None
         self._shape_end = None
+        self._shape_extra = []
         if self._erase_changed:
             self._erase_changed = False
             self.changed.emit()
@@ -937,8 +960,9 @@ class InkCanvas(QWidget):
         elif self._gesture in ("shape", "ask"):
             self._shape_end = point
             self.update()
+        elif self._snap is not None:
+            self._edit_snap(point)
         elif self._points is not None and point != self._points[-1]:
-            self._snapped = None
             previous = self._points[-1]
             self._add_point(point, pressure)
             self._hold.start(self.HOLD_MS)
@@ -967,11 +991,14 @@ class InkCanvas(QWidget):
         elif self._gesture == "shape":
             start = self._shape_start
             if math.dist(start, point) > 2:
-                self._points = list(shape_points(self.shape, start, point))
+                first, *rest = self._shape_polylines(start, point)
+                self._points = list(first)
+                self._shape_extra = rest
                 self._snapped = None
+        elif self._snap is not None:
+            self._edit_snap(point)
         elif self._points is not None and point != self._points[-1]:
             self._add_point(point, pressure)
-            self._snapped = None
         self.finalize_current_gesture()
 
     def _select_in(self, lasso):
@@ -1004,7 +1031,14 @@ class InkCanvas(QWidget):
             result = normalize_shape(self._points)
             if result is not None:
                 self._snapped = result[1]
+                # Keep holding to edit: the shape now follows the pen instead of new ink.
+                self._snap = (result[0], result[1], self._points[-1])
                 self.update()
+
+    def _edit_snap(self, point):
+        kind, clean, anchor = self._snap
+        self._snapped = edit_shape(kind, clean, anchor, point)
+        self.update()
 
     # Erasing ----------------------------------------------------------------
 
@@ -1379,8 +1413,14 @@ class InkCanvas(QWidget):
             painter.setBrush(QColor(47, 125, 225, 30))
             painter.drawRect(QRectF(QPointF(*self._shape_start), QPointF(*self._shape_end)).normalized())
         elif self._shape_start is not None and self._shape_end is not None:
-            self._paint_stroke(painter, self._ink_stroke(
-                shape_points(self.shape, self._shape_start, self._shape_end)))
+            for points in self._shape_polylines(self._shape_start, self._shape_end):
+                self._paint_stroke(painter, self._ink_stroke(points))
+        if self.pending_region is not None:
+            dash = QPen(QColor(ASK_COLOR), 2, Qt.PenStyle.DashLine)
+            dash.setCosmetic(True)
+            painter.setPen(dash)
+            painter.setBrush(QColor(47, 79, 216, 18))
+            painter.drawRoundedRect(self.pending_region, 6 / self.zoom, 6 / self.zoom)
         if self.selection:
             self._paint_frame(painter)
         if self._lasso is not None and len(self._lasso) > 1:

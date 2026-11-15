@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from lapicero.shapes import normalize_shape
+from lapicero.shapes import diagram_strokes, edit_shape, integral_points, normalize_shape
 
 
 def trace(vertices, steps=7):
@@ -78,7 +78,6 @@ def test_irregular_circle_normalizes_to_closed_round_outline():
 @pytest.mark.parametrize("points", [
     trace([(1, 1), (18, 3), (18, 18), (1, 18), (1, 1)]),  # tiny handwriting loop
     trace([(0, 0), (38, 0), (38, 38), (0, 38), (0, 0)]),  # small letter-shaped loop
-    trace([(4, 10), (163, 116)]),  # slash is not an arrow
     trace([(2, 10), (150, 10), (119, 13), (150, 10), (120, 15)]),  # same-side barbs
     trace([(10, 10), (200, 10), (200, 18), (10, 18), (10, 10)]),  # narrow writing loop
     trace([(10, 10), (150, 10), (190, 110), (10, 110), (10, 10)]),  # oblique quadrilateral
@@ -100,3 +99,93 @@ def test_doubled_circle_is_not_single_outline():
 def test_mid_edge_start_still_recognizes_rectangle():
     points = trace([(100, 20), (180, 20), (180, 100), (20, 100), (20, 20), (100, 20)])
     assert normalize_shape(points)[0] == "rectangle"
+
+
+def test_held_straight_stroke_becomes_a_line_but_a_curve_does_not():
+    slash = trace([(4, 10), (163, 116)])
+    assert normalize_shape(slash) == ("line", (slash[0], slash[-1]))
+    arc = [(20 + 150 * i / 30, 100 - 60 * math.sin(math.pi * i / 30)) for i in range(31)]
+    assert normalize_shape(arc) is None
+
+
+def test_rotated_ellipse_is_recognized_and_stays_oval():
+    tilt = math.radians(30)
+    raw = []
+    for i in range(61):
+        t = 2 * math.pi * i / 60
+        x, y = (95 + 3 * math.sin(5 * t)) * math.cos(t), (45 + 2 * math.sin(3 * t)) * math.sin(t)
+        raw.append((200 + x * math.cos(tilt) - y * math.sin(tilt), 150 + x * math.sin(tilt) + y * math.cos(tilt)))
+    kind, clean = normalize_shape(raw)
+    assert kind == "ellipse" and clean[0] == clean[-1]
+    radii = [math.dist(p, (200, 150)) for p in clean]
+    assert max(radii) == pytest.approx(95, abs=6) and min(radii) == pytest.approx(45, abs=6)
+
+
+def flat(points):
+    return [c for p in points for c in p]
+
+
+def test_edit_shape_pivots_lines_on_the_tail_and_keeps_arrow_heads_sized():
+    line = edit_shape("line", ((0, 0), (10, 0)), (10, 0), (0, 20))
+    assert flat(line) == pytest.approx([0, 0, 0, 20])
+    arrow = ((0, 0), (100, 0), (85, -8), (100, 0), (85, 8))
+    tail, tip, wing, again, _ = edit_shape("arrow", arrow, (100, 0), (0, 200))
+    assert tail == (0, 0) and tip == again == pytest.approx((0, 200))
+    assert math.dist(wing, tip) == pytest.approx(math.dist((85, -8), (100, 0)))
+
+
+def test_edit_shape_scales_closed_outlines_around_their_center():
+    square = ((0, 0), (10, 0), (10, 10), (0, 10), (0, 0))
+    assert flat(edit_shape("square", square, (0, 0), (-5, -5))) == pytest.approx(
+        [-5, -5, 15, -5, 15, 15, -5, 15, -5, -5])
+
+
+def test_xyz_axes_share_an_origin_and_point_up_right_and_toward_the_viewer():
+    strokes = diagram_strokes("axes_xyz", (0, 0), (100, 100))
+    arrows, labels = strokes[:3], strokes[3:]
+    origin = arrows[0][0]
+    assert all(arrow[0] == origin and len(arrow) == 5 for arrow in arrows)
+    x, y, z = (arrow[1] for arrow in arrows)
+    assert x[0] < origin[0] and x[1] > origin[1]  # Lower left, toward the viewer.
+    assert y[0] > origin[0] and y[1] == origin[1]
+    assert z[0] == origin[0] and z[1] < origin[1]
+    assert len(labels) == 5  # x and y have two strokes, z one.
+    assert diagram_strokes("axes_xyz", (0, 0), (100, 100), labels=False) == arrows
+
+
+def hand_integral(left=40, top=20, width=40, height=160):
+    clean = integral_points(left, top, left + width, top + height)
+    return [(x + 1.5 * math.sin(i * 1.7), y + 1.2 * math.cos(i * 2.3)) for i, (x, y) in enumerate(clean)]
+
+
+@pytest.mark.parametrize("points", [hand_integral(), hand_integral(width=60, height=140),
+                                    hand_integral()[::-1]])
+def test_held_hand_drawn_integral_snaps_to_a_clean_sign(points):
+    kind, clean = normalize_shape(points)
+    assert kind == "integral" and clean[0][1] < clean[-1][1]
+    assert clean[0][0] > clean[-1][0]  # Top hook on the right, bottom hook on the left.
+    assert max(p[1] for p in clean) - min(p[1] for p in clean) == pytest.approx(
+        max(p[1] for p in points) - min(p[1] for p in points), rel=.08)
+
+
+def s_letter():
+    return [(100 + 30 * math.cos(t), 60 - 25 * math.sin(t)) for t in (math.pi * i / 12 for i in range(4, 19))] + [
+        (100 - 30 * math.cos(t), 110 - 25 * math.sin(t)) for t in (math.pi * i / 12 for i in range(-6, 9))]
+
+
+@pytest.mark.parametrize("points", [
+    s_letter(),
+    [(80, 20 + 4 * i) for i in range(35)] + [(80 - 6 * i, 160 + 3 * math.sin(i)) for i in range(1, 6)],  # J
+    [(60 + 30 * math.cos(math.pi * i / 10), 40 - 20 * math.sin(math.pi * i / 10)) for i in range(11)][::-1][:1]
+    + [(30, 20 + 4 * i) for i in range(35)],  # l-like stroke without hooks
+])
+def test_letters_are_not_integrals(points):
+    result = normalize_shape(points)
+    assert result is None or result[0] != "integral"
+
+
+def test_integral_from_the_engineering_menu_fills_the_box_height():
+    (sign,) = diagram_strokes("integral", (10, 10), (40, 130))
+    assert sign == integral_points(10, 10, 40, 130)
+    ys = [p[1] for p in sign]
+    assert min(ys) == pytest.approx(10, abs=4) and max(ys) == pytest.approx(130, abs=4)

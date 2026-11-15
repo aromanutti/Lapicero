@@ -383,3 +383,17 @@ def test_delete_section_removes_its_pages_and_subsections():
         library.page(page.id)
     with pytest.raises(KeyError):
         library.delete_section(section.id)
+
+
+def test_delete_subject_removes_it_with_everything_inside():
+    library = Library()
+    keep = library.create_subject("Keep")
+    subject = library.create_subject("Physics")
+    section = library.create_section(subject.id, "Mechanics")
+    library.create_page(section.id, "Week 1")
+    assert library.delete_subject(subject.id) is subject
+    assert library.subjects == [keep]
+    with pytest.raises(KeyError):
+        library.section(section.id)
+    with pytest.raises(KeyError):
+        library.delete_subject(subject.id)

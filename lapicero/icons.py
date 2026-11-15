@@ -1,11 +1,13 @@
-"""Toolbar icons painted with QPainter, so the app ships no image assets."""
+"""Toolbar icons and the app logo, painted with QPainter."""
 
 import math
+import struct
+from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 
-from .shapes import shape_points
+from .shapes import diagram_strokes, shape_points
 
 SIZE = 32
 SCALE = 2  # Paint at 2x so icons stay crisp on high-DPI screens.
@@ -87,6 +89,17 @@ def shape_icon(kind):
         for point in points[1:]:
             path.lineTo(QPointF(*point))
         p.drawPath(path)
+    return _canvas(paint)
+
+
+def diagram_icon(kind):
+    def paint(p):
+        _outline(p, 1.8)
+        for points in diagram_strokes(kind, (6, 6), (26, 26), labels=False):
+            path = QPainterPath(QPointF(*points[0]))
+            for point in points[1:]:
+                path.lineTo(QPointF(*point))
+            p.drawPath(path)
     return _canvas(paint)
 
 
@@ -174,3 +187,96 @@ def ask_icon():
             p.drawPoint(QPointF(x, 19))
 
     return _canvas(paint)
+
+
+def history_icon():
+    """Clock with a counter-clockwise arrow: earlier chats."""
+
+    def paint(p):
+        _outline(p, 1.8)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        center = QPointF(16.5, 16)
+        p.drawArc(QRectF(6.5, 6, 20, 20), 200 * 16, -310 * 16)  # Open at the lower left for the arrow.
+        p.drawPolyline(QPolygonF([QPointF(4.5, 12.5), QPointF(7.4, 19), QPointF(12.2, 14.6)]))
+        p.drawPolyline(QPolygonF([QPointF(center.x(), 10.5), center, QPointF(20.5, 18.5)]))
+
+    return _canvas(paint)
+
+
+APP_ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+APP_ICON_PATH = Path(__file__).parent / "assets" / "lapicero.ico"
+
+
+def _paint_logo(p, size):
+    """Lapicero logo: a white ballpoint pen writing a swoosh on a blue tile."""
+    s = size / 64
+    p.scale(s, s)
+    tile = QPainterPath()
+    tile.addRoundedRect(QRectF(2, 2, 60, 60), 14, 14)
+    p.fillPath(tile, QColor("#2F4FD8"))
+
+    swoosh = QPainterPath(QPointF(11, 49))
+    swoosh.cubicTo(17, 41, 21, 54, 27, 47)
+    swoosh.cubicTo(30, 44, 31, 47, 34, 46)
+    p.setPen(QPen(QColor("#AFC0FF"), 3.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                  Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(swoosh)
+
+    # Pen drawn upright, then rotated so its tip lands at the end of the swoosh.
+    p.translate(34, 46)
+    p.rotate(40)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("white"))
+    p.drawPolygon(QPolygonF([QPointF(0, 0), QPointF(-4.5, -9), QPointF(4.5, -9)]))
+    p.drawRoundedRect(QRectF(-4.5, -35, 9, 24), 2.5, 2.5)
+    p.setBrush(QColor("#2F4FD8"))
+    p.drawEllipse(QPointF(0, -1.6), 1.4, 1.4)  # Ballpoint tip.
+    p.drawRect(QRectF(-4.5, -16, 9, 2.2))  # Grip band.
+
+
+def app_logo_pixmap(size):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    _paint_logo(painter, size)
+    painter.end()
+    return pixmap
+
+
+def app_icon():
+    """Window and taskbar icon, painted at every size so small ones stay sharp."""
+    icon = QIcon()
+    for size in APP_ICON_SIZES:
+        icon.addPixmap(app_logo_pixmap(size))
+    return icon
+
+
+def write_app_ico(path=APP_ICON_PATH):
+    """Write a multi-size .ico (PNG entries) for the Windows shortcut."""
+    images = []
+    for size in APP_ICON_SIZES:
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        app_logo_pixmap(size).save(buffer, "PNG")
+        buffer.close()
+        images.append((size, bytes(data)))
+    header = struct.pack("<HHH", 0, 1, len(images))
+    offset = len(header) + 16 * len(images)
+    entries, blobs = b"", b""
+    for size, png in images:
+        side = 0 if size >= 256 else size  # 0 means 256 in the ICO directory.
+        entries += struct.pack("<BBBBHHII", side, side, 0, 0, 1, 32, len(png), offset)
+        offset += len(png)
+        blobs += png
+    Path(path).write_bytes(header + entries + blobs)
+    return Path(path)
+
+
+if __name__ == "__main__":
+    from PySide6.QtGui import QGuiApplication
+
+    _app = QGuiApplication([])
+    print(f"Wrote {write_app_ico()}")
