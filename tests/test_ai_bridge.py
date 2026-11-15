@@ -278,6 +278,8 @@ flags = {name: args[args.index(name) + 1] for name in ("--model", "--effort") if
 resume = args[args.index("--resume") + 1] if "--resume" in args else None
 if resume:
     suffix += " (resumed %s)" % resume
+import time
+time.sleep(float(os.environ.get("FAKE_DELAY", "0")))  # Lets a test act while Claude is "thinking".
 from lapicero.mcp_server import call  # The writing tools still reach the app.
 pages = call("list_pages")["subjects"][0]["sections"][0]["pages"]
 session = os.environ.get("FAKE_SESSION", "session-1")
@@ -591,3 +593,36 @@ def test_damaged_chat_file_does_not_hide_the_others(tmp_path):
     assert [c["id"] for c in reloaded.for_page("page-1")] == [chat["id"]]
     assert reloaded.load_errors and reloaded.load_errors[0].startswith("broken.json")
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_switching_chats_keeps_the_pending_question_running(qt, window, tmp_path, monkeypatch):
+    fake_claude(window, tmp_path)
+    monkeypatch.setenv("FAKE_SESSION", "session-slow")
+    monkeypatch.setenv("FAKE_DELAY", "1.5")
+    slow = window.ask_text("slow question")
+    window.new_chat()  # Leave while Claude is still answering.
+    monkeypatch.setenv("FAKE_DELAY", "0")
+    monkeypatch.setenv("FAKE_SESSION", "session-other")
+    other = window.ask_text("other question")
+    wait_for(qt, lambda: window.ask_panel.answer(other) is not None)
+    assert [entry[2] for entry in window.ask_panel.entries] == ["other question"]  # Not mixed in.
+    old = next(chat for chat in window.chat_store.chats.values() if chat["session_id"] != "session-other")
+    wait_for(qt, lambda: old["entries"][0]["answer"] is not None)
+    assert old["entries"][0]["answer"].startswith("Saw 'slow question'") and not old["entries"][0]["error"]
+    assert old["session_id"] == "session-slow"
+    saved = json.loads((tmp_path / "chats" / f"{old['id']}.json").read_text(encoding="utf-8"))
+    assert saved["entries"][0]["answer"] == old["entries"][0]["answer"]
+    window.open_chat(old["id"])
+    assert window.ask_panel.answer(slow).startswith("Saw 'slow question'")
+
+
+def test_reopening_a_chat_while_it_is_answering_shows_the_answer_when_it_arrives(qt, window, tmp_path, monkeypatch):
+    fake_claude(window, tmp_path)
+    monkeypatch.setenv("FAKE_DELAY", "1.5")
+    slow = window.ask_text("slow question")
+    chat_id = window._chat_record["id"]
+    window.new_chat()
+    window.open_chat(chat_id)
+    assert window.ask_panel.answer(slow) is None and not window.ask_panel.input.isEnabled()  # Still thinking.
+    wait_for(qt, lambda: window.ask_panel.answer(slow) is not None)
+    assert window.ask_panel.answer(slow).startswith("Saw 'slow question'")

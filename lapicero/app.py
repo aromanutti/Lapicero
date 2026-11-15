@@ -157,8 +157,7 @@ class LapiceroWindow(QMainWindow):
         self.canvas.view_changed.connect(self._place_ask_prompt)
         self.ai = AiOperations(self)
         self._asks = {}  # ask id -> running ClaudeAsk
-        self._chat = 0  # Current conversation number; New chat starts the next one.
-        self._ask_chats = {}  # ask id -> conversation number it was asked in
+        self._ask_records = {}  # ask id -> chat it was asked in, until it is answered
         self._session_id = None  # Claude Code session of the current conversation, once known
         self._chat_record = None  # Saved chat shown in the panel; created by its first question
         self.chat_store = ChatStore(self.library.path.parent / CHATS_DIR if self.library.path else None)
@@ -971,19 +970,12 @@ class LapiceroWindow(QMainWindow):
         self._run_ask(ask_id, build_message(build_text_prompt(page_name, question)))
         return ask_id
 
-    def _leave_chat(self):
-        """Stop the current conversation's questions; the next one belongs to another chat."""
-        for ask_id in [ask_id for ask_id, chat in self._ask_chats.items() if chat == self._chat]:
-            run = self._asks.pop(ask_id, None)
-            if run is not None:
-                run.cancel()
-                run.deleteLater()
-        self._save_chat()  # Keeps a question stopped here as unanswered.
-        self._chat += 1
-
     def new_chat(self):
-        """Forget the current conversation; the next question starts a new one."""
-        self._leave_chat()
+        """Show an empty conversation; the next question starts a new chat.
+
+        Questions still being answered keep running; their answers land in their own chat.
+        """
+        self._save_chat()
         self._chat_record = None
         self._session_id = None
         self.ask_panel.clear()
@@ -1013,10 +1005,10 @@ class LapiceroWindow(QMainWindow):
         chat = self.chat_store.chats.get(chat_id)
         if chat is None or (self._chat_record is not None and chat_id == self._chat_record["id"]):
             return
-        self._leave_chat()
+        self._save_chat()
         self._chat_record = chat
         self._session_id = chat.get("session_id")
-        self.ask_panel.load(chat["entries"])
+        self.ask_panel.load(chat["entries"], running=set(self._asks))
 
     def _save_chat(self):
         """Write the panel's conversation to the current chat's file."""
@@ -1024,20 +1016,35 @@ class LapiceroWindow(QMainWindow):
             return
         self._chat_record["entries"] = self.ask_panel.saved_entries()
         self._chat_record["session_id"] = self._session_id
+        self._store_chat(self._chat_record)
+
+    def _store_chat(self, chat):
         try:
-            self.chat_store.save(self._chat_record)
+            self.chat_store.save(chat)
         except OSError as exc:
             self._set_status(tr("Chat not saved"), tr("Could not save the chat: {error}", error=exc), theme.ERROR)
 
-    def _set_answer(self, ask_id, text, is_error=False):
+    def _set_answer(self, ask_id, text, is_error=False, session_id=""):
+        """Put an answer in its chat: the panel when that chat is shown, else its saved file."""
+        chat = self._ask_records.pop(ask_id, self._chat_record)
+        if chat is not None and chat is not self._chat_record:
+            for entry in chat["entries"]:
+                if entry.get("ask_id") == ask_id:
+                    entry["answer"], entry["error"] = text, is_error
+            if session_id:
+                chat["session_id"] = session_id
+            self._store_chat(chat)
+            return
+        if session_id:
+            self._session_id = session_id  # The next question continues from this answer.
         self.ask_panel.set_answer(ask_id, text, is_error)
         self._save_chat()
 
     def _run_ask(self, ask_id, message):
         """Start Claude Code for a question already shown in the panel, resuming the conversation."""
-        self._ask_chats[ask_id] = self._chat
         if self._chat_record is None:
             self._chat_record = new_chat_record(self._page_id)
+        self._ask_records[ask_id] = self._chat_record
         self._save_chat()
         if not self.start_bridge():
             self._set_answer(ask_id, tr("The AI bridge is not running: {error}", error=self.bridge_error), True)
@@ -1099,11 +1106,7 @@ class LapiceroWindow(QMainWindow):
         run = self._asks.pop(ask_id, None)
         if run is not None:
             run.deleteLater()
-        if self._ask_chats.pop(ask_id, None) != self._chat:
-            return  # Its chat was left; that chat already saved the question as unanswered.
-        if session_id:
-            self._session_id = session_id  # The next question continues from this answer.
-        self._set_answer(ask_id, text, is_error)
+        self._set_answer(ask_id, text, is_error, session_id)
 
     def closeEvent(self, event):
         # Stop the bridge first, then run AI writes already queued, so the save below keeps them.

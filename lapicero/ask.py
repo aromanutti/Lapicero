@@ -420,13 +420,16 @@ class AskPanel(QFrame):
         return [{"ask_id": ask_id, "page": page_name, "question": question, "answer": answer, "error": is_error,
                  "image": image} for ask_id, page_name, question, answer, is_error, image in self.entries]
 
-    def load(self, saved):
-        """Show a saved conversation; a question left unanswered is shown as interrupted."""
-        self.entries = [[entry.get("ask_id", ""), entry.get("page"), entry.get("question", ""),
-                         entry.get("answer") if entry.get("answer") is not None else
-                         tr("No answer: the question was interrupted."),
-                         bool(entry.get("error")) or entry.get("answer") is None, entry.get("image")]
-                        for entry in saved]
+    def load(self, saved, running=()):
+        """Show a saved conversation. A question without an answer is still thinking when its
+        ask id is in running, and is shown as interrupted otherwise."""
+        self.entries = []
+        for entry in saved:
+            ask_id, answer, is_error = entry.get("ask_id", ""), entry.get("answer"), bool(entry.get("error"))
+            if answer is None and ask_id not in running:
+                answer, is_error = tr("No answer: the question was interrupted."), True
+            self.entries.append([ask_id, entry.get("page"), entry.get("question", ""), answer, is_error,
+                                 entry.get("image")])
         self._render()
         self.open_chat()
 
