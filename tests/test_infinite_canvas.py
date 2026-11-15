@@ -861,3 +861,54 @@ def test_opening_a_page_builds_only_visible_outlines(canvas, monkeypatch):
     canvas.set_note(Note(strokes=near + far))
     render(canvas)
     assert len(calls) == len(near) and all(any(s is n for n in near) for s in calls)
+
+
+def _wait(app, seconds):
+    import time
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(.005)
+
+
+def test_dragging_a_selection_to_an_edge_scrolls_the_view_and_carries_it(canvas, app):
+    line = Stroke(((100, 100), (200, 200)), "#000000", 3)
+    canvas.set_note(Note(strokes=[line]))
+    canvas.set_mode("select")
+    canvas.selection = [line]
+    mouse(canvas, "press", 150, 150)  # Inside the frame, away from its handles.
+    mouse(canvas, "move", 595, 390)  # Right and bottom edges: scroll right and down.
+    _wait(app, .4)
+    ox, oy = canvas.offset()
+    assert ox > 20 and oy > 20
+    mouse(canvas, "release", 595, 390)
+    (x0, y0), _ = canvas.note.strokes[0].points
+    # The selection stays under the pointer: it moved by the pointer travel plus the scroll.
+    assert x0 == pytest.approx(100 + 445 + ox) and y0 == pytest.approx(100 + 240 + oy)
+    _wait(app, .15)
+    assert canvas.offset() == (ox, oy)  # Scrolling stops with the drag.
+
+
+def test_edge_scroll_only_near_the_edge_and_never_before_the_page_start(canvas, app):
+    line = Stroke(((100, 100), (200, 100)), "#000000", 3)
+    canvas.set_note(Note(strokes=[line]))
+    canvas.set_mode("select")
+    canvas.selection = [line]
+    mouse(canvas, "press", 150, 100)
+    mouse(canvas, "move", 300, 200)  # Middle of the view.
+    _wait(app, .2)
+    assert canvas.offset() == (0.0, 0.0)
+    mouse(canvas, "move", 2, 2)  # Top-left edge, already at the page start.
+    _wait(app, .2)
+    assert canvas.offset() == (0.0, 0.0)
+    mouse(canvas, "release", 2, 2)
+
+
+def test_lasso_near_an_edge_scrolls_too(canvas, app):
+    canvas.set_note(Note(strokes=[Stroke(((100, 100), (200, 100)), "#000000", 3)]))
+    canvas.set_mode("select")
+    mouse(canvas, "press", 50, 50)
+    mouse(canvas, "move", 595, 200)
+    _wait(app, .3)
+    assert canvas.offset()[0] > 0
+    mouse(canvas, "release", 595, 200)

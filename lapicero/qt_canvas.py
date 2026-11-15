@@ -271,6 +271,8 @@ class InkCanvas(QWidget):
     DIAGRAMS = DIAGRAM_KINDS  # Engineering elements: drawn like shapes, as several strokes.
     TILE = 256  # Side of a cached page tile, in widget pixels.
     MAX_TILES = 128  # Cached tiles kept; the farthest from the view are dropped first.
+    EDGE_MARGIN = 48  # Widget pixels from an edge where dragging scrolls the view.
+    EDGE_SPEED = 900  # Widget pixels per second at the very edge (or beyond it).
 
     def __init__(self, note=None, parent=None):
         super().__init__(parent)
@@ -338,6 +340,12 @@ class InkCanvas(QWidget):
         self._hold = QTimer(self)
         self._hold.setSingleShot(True)
         self._hold.timeout.connect(self._hold_end)
+        # Dragging a selection or a lasso near an edge scrolls the view that way (see _edge_tick).
+        self._edge_pos = None
+        self._edge_time = 0.0
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(16)
+        self._edge_timer.timeout.connect(self._edge_tick)
         self._apply_cursor()
 
     # Settings ---------------------------------------------------------------
@@ -845,9 +853,49 @@ class InkCanvas(QWidget):
         if dragged_area is None:
             self.update()
 
+    def _edge_velocity(self, position):
+        """(-1..1, -1..1): how hard a drag at position pushes past each edge of the view."""
+
+        def axis(value, size):
+            margin = min(self.EDGE_MARGIN, size / 4)
+            if margin <= 0:
+                return 0.0
+            if value < margin:
+                return -min(1.0, (margin - value) / margin)
+            if value > size - margin:
+                return min(1.0, (value - (size - margin)) / margin)
+            return 0.0
+
+        return axis(position.x(), self.width()), axis(position.y(), self.height())
+
+    def _edge_follow(self, position):
+        """Remember the drag position; scroll while it stays near an edge."""
+        self._edge_pos = QPointF(position)
+        if self._edge_velocity(position) == (0.0, 0.0):
+            self._edge_timer.stop()
+        elif not self._edge_timer.isActive():
+            self._edge_time = time.monotonic()
+            self._edge_timer.start()
+
+    def _edge_tick(self):
+        if self._gesture != "select" or self._edge_pos is None:
+            self._edge_timer.stop()
+            return
+        vx, vy = self._edge_velocity(self._edge_pos)
+        now = time.monotonic()
+        step = self.EDGE_SPEED * min(now - self._edge_time, .05) / self.zoom
+        self._edge_time = now
+        before = self.offset()
+        self.scroll_by(vx * step, vy * step)
+        if self.offset() != before:
+            # The pointer stayed put but the page moved under it: the drag follows.
+            self._move(self._edge_pos, self._source, edge=True)
+
     def _stop_gesture(self, repaint=True):
         was_active = self._gesture is not None
         self._hold.stop()
+        self._edge_timer.stop()
+        self._edge_pos = None
         self.note.end_erase()
         self._gesture = None
         self._points = None
@@ -944,7 +992,7 @@ class InkCanvas(QWidget):
             self._hold.start(self.HOLD_MS)
             self._update_doc(QRectF(*point, 0, 0))
 
-    def _move(self, position, source, pressure=None):
+    def _move(self, position, source, pressure=None, edge=False):
         if source != self._source or self._gesture is None:
             return
         point = self.to_document(position)
@@ -957,6 +1005,8 @@ class InkCanvas(QWidget):
             elif self._lasso is not None:
                 self._lasso.append(point)
                 self.update()
+            if not edge:
+                self._edge_follow(position)
         elif self._gesture in ("shape", "ask"):
             self._shape_end = point
             self.update()
