@@ -830,7 +830,7 @@ def test_hidden_tools_keep_their_keyboard_shortcuts(window, monkeypatch):
 
 def test_extra_toolbar_items_run_their_commands(window, monkeypatch):
     populate(window, monkeypatch)
-    window.set_toolbar_items(["new_page", "settings", "fullscreen", "paste"])
+    window.set_toolbar_items(["new_page", "settings", "paste"])
     names(monkeypatch, "Page 2")
     window.toolbar_buttons["new_page"].click()
     assert [p.name for p in window.library.subjects[0].sections[0].pages] == ["Page 1", "Page 2"]
@@ -860,18 +860,14 @@ def test_dragging_a_row_in_settings_reorders_the_toolbar(window, monkeypatch, qt
     assert window.toolbar_items[:2] == ["lasso", "sidebar"]
 
 
-def test_fullscreen_item_is_not_duplicated_in_fullscreen(window, monkeypatch, qt):
+def test_fullscreen_is_not_a_toolbar_item_and_its_exit_is_always_there(window, monkeypatch):
+    from lapicero.app import TOOLBAR_GROUPS
     populate(window, monkeypatch)
     monkeypatch.setattr(window, "showFullScreen", lambda: None)
     monkeypatch.setattr(window, "showNormal", lambda: None)
-    monkeypatch.setattr(window, "isFullScreen", lambda: window.header.isHidden())
-    window.set_toolbar_items(["undo", "fullscreen"])
+    assert "fullscreen" not in TOOLBAR_GROUPS
+    window.set_toolbar_items(["undo", "fullscreen"])  # Saved by an older version: ignored.
+    assert window.toolbar_items == ["undo"]
     window.toggle_fullscreen()
-    assert window.toolbar_buttons["fullscreen"].isVisible()
-    assert not window.exit_fullscreen_button.isVisible()
-    window.set_toolbar_items(["undo"])  # Removed while in fullscreen: the way out comes back.
     assert window.exit_fullscreen_button.isVisible()
-    window.set_toolbar_items(["undo", "fullscreen"])
-    assert not window.exit_fullscreen_button.isVisible()
-    window.toggle_fullscreen()
-    assert not window.exit_fullscreen_button.isVisible()
+    assert sum(button.isVisible() for button in window.toolbar.widgets()) == 2

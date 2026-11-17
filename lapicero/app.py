@@ -55,7 +55,7 @@ TOOLBAR_ITEMS = (("sidebar", "Show/hide sidebar", "view"),
                  ("shapes", "Shapes", "tools"), ("engineering", "Engineering elements", "insert"),
                  ("ask", "Ask Claude", "ai"),
                  ("new_page", "New page", "extras"), ("paste", "Paste", "extras"),
-                 ("fullscreen", "Fullscreen", "extras"), ("settings", "Settings", "extras"))
+                 ("settings", "Settings", "extras"))
 TOOLBAR_GROUPS = {item: group for item, _, group in TOOLBAR_ITEMS}
 DEFAULT_TOOLBAR = tuple(item for item, _, group in TOOLBAR_ITEMS if group != "extras")
 SHORTCUTS = ("P pen · E eraser · L lasso · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
@@ -486,7 +486,6 @@ class LapiceroWindow(QMainWindow):
         for item, icon, tip, handler in (
                 ("new_page", icons.new_page_icon(), "New page (Ctrl+N)", "new_page"),
                 ("paste", icons.paste_icon(), "Paste (Ctrl+V)", "paste"),
-                ("fullscreen", icons.fullscreen_icon(), "Fullscreen (F11, Esc to leave)", "toggle_fullscreen"),
                 ("settings", icons.settings_icon(), "Settings", "show_settings")):
             extras[item] = self._tool_button(bar, icon, tip)
             extras[item].clicked.connect(lambda checked=False, h=handler: getattr(self, h)())
@@ -528,16 +527,11 @@ class LapiceroWindow(QMainWindow):
         self.toolbar.set_widgets(entries)
         for item, button in self.toolbar_buttons.items():
             button.setVisible(item in self.toolbar_items)
-        self._show_exit_fullscreen(self.isFullScreen())
         if hasattr(self, "settings_dialog"):
             self.settings_dialog.set_toolbar_items(self.toolbar_items)
         self._place_toolbar()
         if save:
             self._save_ui_settings()
-
-    def _show_exit_fullscreen(self, full):
-        """The header's way out is hidden in fullscreen; skip it if the toolbar already has one."""
-        self.exit_fullscreen_button.setVisible(full and "fullscreen" not in self.toolbar_items)
 
     def toolbar_menu(self):
         menu = QMenu(self)
@@ -657,7 +651,7 @@ class LapiceroWindow(QMainWindow):
         self.page_frame.layout().setContentsMargins(*((0, 0, 0, 0) if full else (1, 1, 1, 1)))
         self.page_frame.setProperty("bare", full)
         self.page_frame.setStyleSheet("QFrame#page { border: 0; border-radius: 0; }" if full else "")
-        self._show_exit_fullscreen(full)
+        self.exit_fullscreen_button.setVisible(full)
         if full:
             self.sidebar.hide()
             self.showFullScreen()
