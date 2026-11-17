@@ -49,19 +49,21 @@ QPushButton#footerButton:hover {{ background: #ECECE8; }}
 QPushButton#footerButton:disabled {{ color: #A8A8A2; }}
 
 QFrame#page {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 16px; }}
-QFrame#floatingToolbar, QFrame#zoomPill {{ background: rgba(255, 255, 255, 240);
-    border: 1px solid {BORDER}; border-radius: 16px; }}
-QFrame#zoomPill {{ border-radius: 12px; }}
+/* Toolbar and zoom pill paint their own card and shadow (FloatingToolbar.paintEvent). */
+QFrame#floatingToolbar, QFrame#zoomPill {{ background: transparent; border: 0; }}
 QFrame#separator {{ background: {BORDER}; border: 0; }}
-QFrame#floatingToolbar QToolButton, QFrame#zoomPill QToolButton {{ border: 0; border-radius: 11px;
-    padding: 4px; background: transparent; color: #3A3A37; }}
-QFrame#zoomPill QToolButton {{ border-radius: 8px; padding: 4px 8px; min-width: 18px; }}
-QFrame#floatingToolbar QToolButton:hover, QFrame#zoomPill QToolButton:hover {{ background: #EFEFEC; }}
-QFrame#floatingToolbar QToolButton:checked {{ background: #E2E2DD; }}
+QFrame#floatingToolbar QToolButton, QFrame#zoomPill QToolButton {{ border: 1px solid transparent;
+    border-radius: 10px; padding: 4px; background: transparent; color: #3A3A37; }}
+QFrame#zoomPill QToolButton {{ border-radius: 8px; padding: 3px 8px; min-width: 18px; }}
+QFrame#floatingToolbar QToolButton:hover, QFrame#zoomPill QToolButton:hover {{ background: #F2F2EF; }}
+QFrame#floatingToolbar QToolButton:pressed {{ background: #E6E6E1; }}
+QFrame#floatingToolbar QToolButton:checked {{ background: #EDEDE9; border-color: #DCDCD6; }}
+QFrame#floatingToolbar QToolButton:disabled {{ color: #B5B5AE; }}
 QFrame#floatingToolbar QToolButton::menu-button {{ border: 0; width: 14px; }}
-QFrame#floatingToolbar QToolButton#askButton {{ background: #E9EDFC; color: {ACCENT};
-    border: 1px solid #CBD5F7; font-weight: 600; padding: 4px 12px 4px 6px; }}
-QFrame#floatingToolbar QToolButton#askButton:hover {{ background: #DDE4FB; }}
+QFrame#floatingToolbar QToolButton::menu-arrow {{ image: url({CHEVRON}); width: 10px; height: 10px; }}
+QFrame#floatingToolbar QToolButton#askButton {{ background: #EEF1FD; color: {ACCENT};
+    border: 1px solid #D3DBF8; font-weight: 600; padding: 4px 12px 4px 6px; margin-left: 2px; }}
+QFrame#floatingToolbar QToolButton#askButton:hover {{ background: #E2E8FB; }}
 QFrame#floatingToolbar QToolButton#askButton:checked {{ background: {ACCENT}; color: {SURFACE};
     border-color: {ACCENT}; }}
 
@@ -108,6 +110,14 @@ QLabel#hint {{ color: {MUTED}; }}
 QPushButton#primary {{ background: {INK}; color: {SURFACE}; border: 0; border-radius: 10px;
     padding: 9px 20px; font-weight: 600; }}
 QPushButton#primary:hover {{ background: #33333A; }}
+QPushButton#secondary {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 10px;
+    padding: 7px 14px; color: #3A3A37; }}
+QPushButton#secondary:hover {{ background: #F4F4F1; border-color: #CFCFC9; }}
+QListWidget#toolbarList {{ background: #FAFAF8; border: 1px solid {BORDER}; border-radius: 12px;
+    padding: 6px; outline: 0; }}
+QListWidget#toolbarList::item {{ min-height: 30px; border-radius: 8px; padding-left: 4px; color: {INK}; }}
+QListWidget#toolbarList::item:hover {{ background: #F0F0EC; }}
+QListWidget#toolbarList::item:selected {{ background: #ECECE8; color: {INK}; }}
 
 QFrame#penPanel {{ background: {SURFACE}; border: 1px solid {BORDER}; }}
 QFrame#penPanel QToolButton {{ border: 0; border-radius: 8px; padding: 3px; }}

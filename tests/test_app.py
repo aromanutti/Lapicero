@@ -745,3 +745,116 @@ def test_delete_subject_asks_first_and_closes_its_open_page(window, monkeypatch)
     assert window._page_id is None and not window.canvas.isEnabled()
     assert window.tree.topLevelItemCount() == 0
     assert Library.load(window.library.path).subjects == []
+
+
+def toolbar_row(window):
+    """Ids of the customizable items shown on the toolbar, left to right."""
+    shown = [button for button in window.toolbar.widgets() if button.isVisibleTo(window.toolbar)]
+    ids = {button: item for item, button in window.toolbar_buttons.items()}
+    return [ids[button] for button in shown if button in ids]
+
+
+def test_toolbar_shows_the_default_items_in_order(window, monkeypatch):
+    from lapicero.app import DEFAULT_TOOLBAR, TOOLBAR_ITEMS
+    populate(window, monkeypatch)
+    assert toolbar_row(window) == list(DEFAULT_TOOLBAR)
+    extras = [item for item, _, _ in TOOLBAR_ITEMS if item not in DEFAULT_TOOLBAR]
+    assert extras and all(not window.toolbar_buttons[item].isVisible() for item in extras)
+    assert window.settings_dialog.toolbar_items() == list(DEFAULT_TOOLBAR)
+
+
+def test_toolbar_items_can_be_removed_added_and_reordered_from_settings(window, monkeypatch, qt):
+    populate(window, monkeypatch)
+    window.resize(1400, 900)
+    qt.processEvents()
+    dialog = window.settings_dialog
+    dialog.set_item_checked("eraser", False)
+    assert "eraser" not in toolbar_row(window) and not window.eraser_button.isVisible()
+    dialog.set_item_checked("new_page", True)
+    assert toolbar_row(window)[-1] == "new_page" and window.toolbar_buttons["new_page"].isVisible()
+    dialog.move_item("new_page", 0)
+    assert toolbar_row(window)[0] == "new_page"
+    assert abs(window.toolbar.geometry().center().x() - view_rect(window).center().x()) <= 1
+    saved = json.loads((window.library.path.parent / "ui.json").read_text(encoding="utf-8"))
+    assert saved["toolbar_items"] == toolbar_row(window)
+    again = LapiceroWindow(library_path=window.library.path)
+    try:
+        again.show()
+        qt.processEvents()
+        assert toolbar_row(again) == saved["toolbar_items"]
+        assert again.settings_dialog.toolbar_items() == saved["toolbar_items"]
+    finally:
+        again.library._saved = again.library._data()
+        again.close()
+
+
+def test_toolbar_reset_restores_the_defaults(window, monkeypatch):
+    from lapicero.app import DEFAULT_TOOLBAR
+    populate(window, monkeypatch)
+    window.set_toolbar_items(["ask", "undo"])
+    assert toolbar_row(window) == ["ask", "undo"]
+    assert window.settings_dialog.toolbar_items() == ["ask", "undo"]
+    window.settings_dialog.reset_button.click()
+    assert toolbar_row(window) == list(DEFAULT_TOOLBAR)
+
+
+def test_saved_toolbar_ignores_unknown_and_duplicate_items(qt, tmp_path):
+    from lapicero.app import DEFAULT_TOOLBAR
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / "ui.json").write_text(json.dumps({"toolbar_items": ["undo", "bogus", "undo", "ask"]}),
+                                    encoding="utf-8")
+    window = LapiceroWindow(library_path=folder / "library.json")
+    try:
+        assert window.toolbar_items == ["undo", "ask"]
+    finally:
+        window.close()
+    (folder / "ui.json").write_text(json.dumps({"toolbar_items": "nope"}), encoding="utf-8")
+    window = LapiceroWindow(library_path=folder / "library.json")
+    try:
+        assert window.toolbar_items == list(DEFAULT_TOOLBAR)
+    finally:
+        window.close()
+
+
+def test_hidden_tools_keep_their_keyboard_shortcuts(window, monkeypatch):
+    from PySide6.QtTest import QTest
+    populate(window, monkeypatch)
+    window.set_toolbar_items(["undo", "redo"])
+    window.canvas.setFocus()
+    QTest.keyClick(window.canvas, Qt.Key.Key_E)
+    assert window.canvas.mode == "eraser"
+    QTest.keyClick(window.canvas, Qt.Key.Key_P)
+    assert window.canvas.mode == "pen"
+
+
+def test_extra_toolbar_items_run_their_commands(window, monkeypatch):
+    populate(window, monkeypatch)
+    window.set_toolbar_items(["new_page", "settings", "fullscreen", "paste"])
+    names(monkeypatch, "Page 2")
+    window.toolbar_buttons["new_page"].click()
+    assert [p.name for p in window.library.subjects[0].sections[0].pages] == ["Page 1", "Page 2"]
+    window.toolbar_buttons["settings"].click()
+    assert window.settings_dialog.isVisible()
+    window.settings_dialog.accept()
+    called = []
+    monkeypatch.setattr(window, "paste", lambda: called.append(True))
+    window.toolbar_buttons["paste"].click()
+    assert called
+
+
+def test_toolbar_context_menu_offers_customize(window, monkeypatch):
+    populate(window, monkeypatch)
+    menu = window.toolbar_menu()
+    assert [action.text() for action in menu.actions()] == ["Customize toolbar…"]
+    menu.actions()[0].trigger()
+    assert window.settings_dialog.isVisible()
+    window.settings_dialog.accept()
+
+
+def test_dragging_a_row_in_settings_reorders_the_toolbar(window, monkeypatch, qt):
+    populate(window, monkeypatch)
+    model = window.settings_dialog.toolbar_list.model()
+    assert model.moveRow(model.index(0, 0).parent(), 3, model.index(0, 0).parent(), 0)  # Lasso to the top.
+    qt.processEvents()
+    assert window.toolbar_items[:2] == ["lasso", "sidebar"]

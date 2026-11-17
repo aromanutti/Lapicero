@@ -31,28 +31,29 @@ def _outline(painter, width=1.6, color=INK):
 
 
 def pen_icon(color, highlighter=False):
-    """Upright pen like OneNote's: grey barrel, colored band and tip."""
+    """Slanted pen with an ink-colored nib, over a short stroke of its own ink."""
     tint = QColor(color[:7])
 
     def paint(p):
-        body_width = 12 if highlighter else 9
-        left = 16 - body_width / 2
-        _outline(p, 1.2)
-        p.setBrush(QColor("#f4f4f4"))
-        p.drawRoundedRect(QRectF(left, 3, body_width, 15), 2, 2)
+        # The stroke it draws, so the color reads even at small sizes.
+        stroke = QColor(tint)
+        stroke.setAlphaF(.55 if highlighter else 1)
+        p.setPen(QPen(stroke, 5 if highlighter else 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        path = QPainterPath(QPointF(5, 27))
+        path.cubicTo(QPointF(10, 24.5), QPointF(13, 29), QPointF(19, 26.5))
+        p.drawPath(path)
+        p.translate(19, 13)
+        p.rotate(45)
+        half = 4.5 if highlighter else 3.5
+        _outline(p, 1.3)
+        p.setBrush(QColor("#fbfbfa"))
+        p.drawRoundedRect(QRectF(-half, -12, half * 2, 15), 2.2, 2.2)
         p.setBrush(tint)
-        p.drawRect(QRectF(left, 13, body_width, 5))
-        tip = QPolygonF([QPointF(left, 18), QPointF(left + body_width, 18),
-                         QPointF(16 + (3 if highlighter else 1.5), 27),
-                         QPointF(16 - (3 if highlighter else 1.5), 27)])
-        p.setBrush(QColor("#d9d9d9"))
-        p.drawPolygon(tip)
-        p.setBrush(tint)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRect(QRectF(16 - (3 if highlighter else 1.5), 24, 6 if highlighter else 3, 4))
-        if highlighter:
-            p.setOpacity(.55)
-            p.drawRoundedRect(QRectF(5, 28, 22, 3), 1.5, 1.5)
+        p.drawRoundedRect(QRectF(-half, -12, half * 2, 4), 2.2, 2.2)  # Cap in the ink color.
+        nib = (QPolygonF([QPointF(-half, 3), QPointF(half, 3), QPointF(half, 7), QPointF(-half * .2, 9)])
+               if highlighter else
+               QPolygonF([QPointF(-half, 3), QPointF(half, 3), QPointF(0, 9.5)]))
+        p.drawPolygon(nib)
     return _canvas(paint)
 
 
@@ -155,6 +156,40 @@ def sidebar_icon():
         p.drawLine(QPointF(12, 7), QPointF(12, 25))
         for y in (11, 15, 19):
             p.drawLine(QPointF(7.5, y), QPointF(9.5, y))
+    return _canvas(paint)
+
+
+def new_page_icon():
+    def paint(p):
+        _outline(p, 1.6)
+        path = QPainterPath(QPointF(19, 4))
+        for x, y in ((8, 4), (8, 28), (24, 28), (24, 9), (19, 4), (19, 9), (24, 9)):
+            path.lineTo(QPointF(x, y))
+        p.drawPath(path)
+        p.drawLine(QPointF(16, 14), QPointF(16, 22))
+        p.drawLine(QPointF(12, 18), QPointF(20, 18))
+    return _canvas(paint)
+
+
+def paste_icon():
+    def paint(p):
+        _outline(p, 1.6)
+        p.drawRoundedRect(QRectF(7, 7, 18, 21), 2.5, 2.5)
+        p.setBrush(QColor("#fbfbfa"))
+        p.drawRoundedRect(QRectF(12, 4, 8, 5), 1.5, 1.5)
+        for y in (15, 19, 23):
+            p.drawLine(QPointF(11.5, y), QPointF(20.5 if y < 23 else 17, y))
+    return _canvas(paint)
+
+
+def settings_icon():
+    """Three sliders: preferences."""
+    def paint(p):
+        _outline(p, 1.6)
+        for y, knob in ((9, 20), (16, 11), (23, 17)):
+            p.drawLine(QPointF(6, y), QPointF(26, y))
+            p.setBrush(QColor("#fbfbfa"))
+            p.drawEllipse(QPointF(knob, y), 2.6, 2.6)
     return _canvas(paint)
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import QDateTime, QEvent, QPoint, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence, QPainterPath, QRegion
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPainterPath, QRegion
 from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame,
                                QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
                                QApplication, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
@@ -47,30 +47,85 @@ UI_SETTINGS = "ui.json"  # Window preferences beside the library file.
 # Save once the pen has rested this long: writing a whole library after every
 # stroke froze the app between letters. Close and Ctrl+S still save at once.
 AUTOSAVE_DELAY_MS = 1200
+# Every item the toolbar can show: (id, label, group). Separators fall between groups.
+TOOLBAR_ITEMS = (("sidebar", "Show/hide sidebar", "view"),
+                 ("undo", "Undo", "history"), ("redo", "Redo", "history"),
+                 ("lasso", "Lasso select", "tools"), ("eraser", "Eraser", "tools"),
+                 *((name.lower().replace(" ", "_"), name, "tools") for name, *_ in PEN_PRESETS),
+                 ("shapes", "Shapes", "tools"), ("engineering", "Engineering elements", "insert"),
+                 ("ask", "Ask Claude", "ai"),
+                 ("new_page", "New page", "extras"), ("paste", "Paste", "extras"),
+                 ("fullscreen", "Fullscreen", "extras"), ("settings", "Settings", "extras"))
+TOOLBAR_GROUPS = {item: group for item, _, group in TOOLBAR_ITEMS}
+DEFAULT_TOOLBAR = tuple(item for item, _, group in TOOLBAR_ITEMS if group != "extras")
 SHORTCUTS = ("P pen · E eraser · L lasso · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
              "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom · F11 fullscreen")
 
 
 class FloatingToolbar(QFrame):
-    """Compact OneNote-like tool strip floating over the top of the page."""
+    """Floating card of tools over the page, with its own soft shadow.
+
+    The card and shadow are painted here rather than with a QGraphicsEffect, so the
+    toolbar keeps its single effect slot for fading while the pen is down.
+    """
+
+    SHADOW = (8, 2, 8, 12)  # Left, top, right and bottom room for the shadow.
+    RADIUS = 14
 
     def __init__(self, parent, name="floatingToolbar"):
         super().__init__(parent)
         self.setObjectName(name)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(6, 6, 6, 6)
+        left, top, right, bottom = self.SHADOW
+        self._layout.setContentsMargins(left + 5, top + 5, right + 5, bottom + 5)
         self._layout.setSpacing(2)
+        self._separators = []
+
+    def card(self):
+        left, top, right, bottom = self.SHADOW
+        return QRectF(self.rect()).adjusted(left + .5, top + .5, -right - .5, -bottom - .5)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        card = self.card()
+        painter.setPen(Qt.PenStyle.NoPen)
+        # A soft, slightly lowered shadow: stacked translucent rounded rects.
+        for spread, alpha in ((7, 5), (5, 7), (3, 10), (1.5, 14)):
+            painter.setBrush(QColor(28, 28, 30, alpha))
+            painter.drawRoundedRect(card.adjusted(-spread, -spread + 3, spread, spread + 3),
+                                    self.RADIUS + spread, self.RADIUS + spread)
+        painter.setBrush(QColor(theme.SURFACE))
+        painter.setPen(QColor(theme.BORDER))
+        painter.drawRoundedRect(card, self.RADIUS, self.RADIUS)
 
     def addWidget(self, widget):
         self._layout.addWidget(widget)
 
-    def addSeparator(self):
-        line = QFrame()
-        line.setObjectName("separator")
-        line.setFixedSize(1, 24)
-        self._layout.addSpacing(4)
-        self._layout.addWidget(line)
-        self._layout.addSpacing(4)
+    def widgets(self):
+        """Widgets in the strip, left to right, separators excluded."""
+        items = (self._layout.itemAt(i).widget() for i in range(self._layout.count()))
+        return [widget for widget in items if widget is not None and widget not in self._separators]
+
+    def set_widgets(self, entries):
+        """Lay out entries left to right; None draws a separator."""
+        while self._layout.count():
+            self._layout.takeAt(0)
+        for line in self._separators:
+            line.deleteLater()
+        self._separators = []
+        for widget in entries:
+            if widget is None:
+                line = QFrame(self)
+                line.setObjectName("separator")
+                line.setFixedSize(1, 20)
+                self._separators.append(line)
+                self._layout.addSpacing(5)
+                self._layout.addWidget(line, 0, Qt.AlignmentFlag.AlignVCenter)
+                self._layout.addSpacing(5)
+            else:
+                self._layout.addWidget(widget)
 
 
 class PenPreset:
@@ -339,7 +394,9 @@ class LapiceroWindow(QMainWindow):
             self._place_toolbar()
 
     def _tool_button(self, toolbar, icon, tip, checkable=False):
-        button = QToolButton()
+        """A toolbar button; set_toolbar_items decides whether and where it shows."""
+        button = QToolButton(toolbar)
+        button.hide()
         button.setIcon(icon)
         button.setToolTip(tr(tip))
         button.setAccessibleName(tr(tip))
@@ -347,12 +404,14 @@ class LapiceroWindow(QMainWindow):
         button.setAutoRaise(True)
         side = TOOLBAR_SIZES[self.toolbar_size]
         button.setIconSize(QSize(side, side))
-        toolbar.addWidget(button)
         return button
 
     def _toolbar(self):
         bar = FloatingToolbar(self.centralWidget())
         bar.setToolTip(tr(SHORTCUTS))
+        bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        bar.customContextMenuRequested.connect(
+            lambda position: self.toolbar_menu().exec(bar.mapToGlobal(position)))
         self.toolbar = bar
         self._fade = QGraphicsOpacityEffect(bar)
         self._fade.setEnabled(False)
@@ -361,12 +420,10 @@ class LapiceroWindow(QMainWindow):
         self.sidebar_button = self._tool_button(bar, icons.sidebar_icon(), "Show/hide sidebar", True)
         self.sidebar_button.setChecked(True)
         self.sidebar_button.toggled.connect(self.sidebar.setVisible)
-        bar.addSeparator()
         self.undo_button = self._tool_button(bar, icons.undo_icon(), "Undo (Ctrl+Z)")
         self.redo_button = self._tool_button(bar, icons.redo_icon(), "Redo (Ctrl+Y)")
         self.undo_button.clicked.connect(self.undo)
         self.redo_button.clicked.connect(self.redo)
-        bar.addSeparator()
         tools = QButtonGroup(self)
         tools.setExclusive(True)
         self.select_button = self._tool_button(
@@ -400,7 +457,6 @@ class LapiceroWindow(QMainWindow):
         self.shape_kind = "rectangle"
         self.shape_button.clicked.connect(lambda: self.choose_shape(self.shape_kind))
         tools.addButton(self.shape_button)
-        bar.addSeparator()
         # Engineering elements: drag a box to place the diagram, like a shape.
         self.diagram_kind = "axes_xy"
         self.diagram_button = self._tool_button(
@@ -415,7 +471,6 @@ class LapiceroWindow(QMainWindow):
         self.diagram_button.setMenu(menu)
         self.diagram_button.clicked.connect(lambda: self.choose_diagram(self.diagram_kind))
         tools.addButton(self.diagram_button)
-        bar.addSeparator()
         self.ask_button = self._tool_button(
             bar, icons.ask_icon(), "Ask Claude (A): drag a box around something, then type a question", True)
         self.ask_button.setObjectName("askButton")
@@ -427,12 +482,72 @@ class LapiceroWindow(QMainWindow):
         self.exit_fullscreen_button = self._tool_button(bar, icons.fullscreen_icon(), "Leave fullscreen (F11 or Esc)")
         self.exit_fullscreen_button.clicked.connect(self.toggle_fullscreen)
         self.exit_fullscreen_button.hide()
+        extras = {}
+        for item, icon, tip, handler in (
+                ("new_page", icons.new_page_icon(), "New page (Ctrl+N)", "new_page"),
+                ("paste", icons.paste_icon(), "Paste (Ctrl+V)", "paste"),
+                ("fullscreen", icons.fullscreen_icon(), "Fullscreen (F11, Esc to leave)", "toggle_fullscreen"),
+                ("settings", icons.settings_icon(), "Settings", "show_settings")):
+            extras[item] = self._tool_button(bar, icon, tip)
+            extras[item].clicked.connect(lambda checked=False, h=handler: getattr(self, h)())
+        self.new_page_action.changed.connect(
+            lambda: extras["new_page"].setEnabled(self.new_page_action.isEnabled()))
+        pens = [item for item, _, _ in TOOLBAR_ITEMS[5:5 + len(self.pen_buttons)]]
+        self.toolbar_buttons = {
+            "sidebar": self.sidebar_button, "undo": self.undo_button, "redo": self.redo_button,
+            "lasso": self.select_button, "eraser": self.eraser_button,
+            **dict(zip(pens, self.pen_buttons)),
+            "shapes": self.shape_button, "engineering": self.diagram_button, "ask": self.ask_button,
+            **extras}
+        assert list(self.toolbar_buttons) == [item for item, _, _ in TOOLBAR_ITEMS]
         self._pen_panel()
         self._use_preset(self.presets[0])
+        self.set_toolbar_items(self._load_ui_settings().get("toolbar_items", list(DEFAULT_TOOLBAR)), save=False)
+
+    @staticmethod
+    def _clean_toolbar_items(items):
+        """Known ids, each once, in the given order; anything unusable means the defaults."""
+        if not isinstance(items, list):
+            return list(DEFAULT_TOOLBAR)
+        clean = []
+        for item in items:
+            if isinstance(item, str) and item in TOOLBAR_GROUPS and item not in clean:
+                clean.append(item)
+        return clean
+
+    def set_toolbar_items(self, items, save=True):
+        """Show these toolbar items in this order, and hide the rest."""
+        self.toolbar_items = self._clean_toolbar_items(items)
+        entries, group = [], None
+        for item in self.toolbar_items:
+            if group is not None and TOOLBAR_GROUPS[item] != group:
+                entries.append(None)
+            group = TOOLBAR_GROUPS[item]
+            entries.append(self.toolbar_buttons[item])
+        entries.append(self.exit_fullscreen_button)
+        self.toolbar.set_widgets(entries)
+        for item, button in self.toolbar_buttons.items():
+            button.setVisible(item in self.toolbar_items)
+        if hasattr(self, "settings_dialog"):
+            self.settings_dialog.set_toolbar_items(self.toolbar_items)
+        self._place_toolbar()
+        if save:
+            self._save_ui_settings()
+
+    def toolbar_menu(self):
+        menu = QMenu(self)
+        customize = menu.addAction(tr("Customize toolbar…"))
+        customize.triggered.connect(lambda checked=False: self.show_settings(toolbar=True))
+        return menu
 
     def _settings(self):
         """Rarely changed options live in a dialog, keeping the toolbar for drawing."""
         self.settings_dialog = SettingsDialog(TOOLBAR_SIZES, ASK_MODELS, ASK_EFFORTS, self)
+        self.settings_dialog.set_toolbar_choices(
+            [(item, self.toolbar_buttons[item].icon(), tr(label)) for item, label, _ in TOOLBAR_ITEMS],
+            DEFAULT_TOOLBAR)
+        self.settings_dialog.set_toolbar_items(self.toolbar_items)
+        self.settings_dialog.toolbar_changed.connect(self.set_toolbar_items)
         self.size_combo = self.settings_dialog.size_combo
         self.size_combo.setCurrentIndex(self.size_combo.findData(self.toolbar_size))
         self.size_combo.currentIndexChanged.connect(
@@ -450,8 +565,10 @@ class LapiceroWindow(QMainWindow):
             link_choices(combo, choice)
             combo.currentIndexChanged.connect(self._save_ui_settings)
 
-    def show_settings(self):
+    def show_settings(self, toolbar=False):
         self.settings_dialog.open()
+        if toolbar:
+            self.settings_dialog.focus_toolbar()
 
     def _pen_panel(self):
         """Popup with color swatches and width for the active pen preset."""
@@ -481,6 +598,8 @@ class LapiceroWindow(QMainWindow):
 
     def _show_pen_panel(self, preset):
         button = self.pen_buttons[self.presets.index(preset)]
+        if not button.isVisible():  # Removed from the toolbar: open under the toolbar instead.
+            button = self.toolbar
         self.pen_panel.adjustSize()
         self.pen_panel.move(button.mapToGlobal(QPoint(0, button.height())))
         self.pen_panel.show()
@@ -583,6 +702,8 @@ class LapiceroWindow(QMainWindow):
 
     def _save_ui_settings(self):
         data = {"toolbar_size": self.toolbar_size, "language": self.language}
+        if hasattr(self, "toolbar_items"):
+            data["toolbar_items"] = self.toolbar_items
         if hasattr(self, "settings_dialog"):
             # Saved for the next start; this window keeps the language it was built in.
             data["language"] = self.settings_dialog.language_choice.currentData()
@@ -609,7 +730,9 @@ class LapiceroWindow(QMainWindow):
         widget = self.view if self.view.isVisible() else self.placeholder
         origin = widget.mapTo(self.centralWidget(), QPoint(0, 0))
         self.toolbar.adjustSize()
-        self.toolbar.move(origin.x() + widget.width() // 2 - self.toolbar.width() // 2, origin.y() + 12)
+        # The card, not the shadow around it, sits 12px below the page's top edge.
+        self.toolbar.move(origin.x() + widget.width() // 2 - self.toolbar.width() // 2,
+                          origin.y() + 12 - FloatingToolbar.SHADOW[1])
         self.toolbar.raise_()
         if hasattr(self, "zoom_pill"):
             pill = self.zoom_pill
