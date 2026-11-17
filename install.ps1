@@ -44,21 +44,36 @@ function Test-Command($name) { return [bool](Get-Command $name -ErrorAction Sile
 # Re-read PATH from the registry so tools installed by this script are found
 # without opening a new terminal.
 function Update-SessionPath {
-    $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $user = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = "$machine;$user"
-    $claudeBin = Join-Path $env:USERPROFILE ".local\bin"
-    if ((Test-Path $claudeBin) -and ($env:Path -notlike "*$claudeBin*")) { $env:Path = "$env:Path;$claudeBin" }
+    # Entries already in this session (an activated venv or conda shell, tools the
+    # parent process added) stay first; registry entries are only appended.
+    $entries = New-Object System.Collections.Generic.List[string]
+    $sources = @(
+        $env:Path,
+        [Environment]::GetEnvironmentVariable("Path", "Machine"),
+        [Environment]::GetEnvironmentVariable("Path", "User"),
+        (Join-Path $env:USERPROFILE ".local\bin")
+    )
+    foreach ($source in $sources) {
+        if (-not $source) { continue }
+        foreach ($entry in $source.Split(";")) {
+            $clean = $entry.Trim()
+            if ($clean -and -not ($entries -contains $clean)) { $entries.Add($clean) }
+        }
+    }
+    $env:Path = $entries -join ";"
 }
 
+# Runs winget; callers detect the tool again afterwards instead of trusting the exit
+# code, because winget also fails with "already installed" when the package is there
+# but not on PATH.
 function Install-WithWinget($id, $label) {
     if (-not (Test-Command "winget")) {
         Write-Bad "winget is not available. Install $label manually, then run this installer again."
-        return $false
+        return
     }
     winget install --id $id --exact --source winget --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) { Write-Warn "winget exited with code $LASTEXITCODE; checking again whether $label is usable." }
     Update-SessionPath
-    return ($LASTEXITCODE -eq 0)
 }
 
 # Returns @{ Command = <array>; Version = <version> } for the first Python 3.10+ found, or $null.
@@ -109,10 +124,14 @@ if ($python) {
 } else {
     Write-Bad "Python $minPython+ was not found."
     if (Confirm-Action "Install Python 3.13 with winget?") {
-        if (Install-WithWinget "Python.Python.3.13" "Python") { $python = Find-Python }
+        Install-WithWinget "Python.Python.3.13" "Python"
+        $python = Find-Python
     }
     if ($python) { Write-Ok "Python $($python.Version) installed" }
-    else { $missingRequired += "Python $minPython+ (https://www.python.org/downloads/windows/)" }
+    else {
+        Write-Bad "Python $minPython+ is still not found. If it is installed, make sure it is on PATH (or open a new terminal)."
+        $missingRequired += "Python $minPython+ (https://www.python.org/downloads/windows/)"
+    }
 }
 
 # --- 3. Virtual environment and Python packages ------------------------------
@@ -154,16 +173,19 @@ if ($claudeVersion) {
 } else {
     Write-Warn "Claude Code was not found. Lapicero works without it, but Ask Claude needs it."
     if (Confirm-Action "Install Claude Code with the official native installer (irm https://claude.ai/install.ps1 | iex)?") {
-        try {
-            Invoke-RestMethod https://claude.ai/install.ps1 | Invoke-Expression
-        } catch {
-            Write-Bad "Native installer failed: $($_.Exception.Message)"
-            if (Confirm-Action "Try winget instead (winget install Anthropic.ClaudeCode)?") {
-                Install-WithWinget "Anthropic.ClaudeCode" "Claude Code" | Out-Null
-            }
-        }
+        # The documented command runs in a child PowerShell, so an `exit` or a
+        # non-terminating error inside Anthropic's script cannot end this installer.
+        # Success is judged by whether `claude --version` works afterwards.
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"
         Update-SessionPath
         $claudeVersion = Get-ClaudeVersion
+        if (-not $claudeVersion) {
+            Write-Bad "The native installer did not leave a working claude command."
+            if (Confirm-Action "Try winget instead (winget install Anthropic.ClaudeCode)?") {
+                Install-WithWinget "Anthropic.ClaudeCode" "Claude Code"
+                $claudeVersion = Get-ClaudeVersion
+            }
+        }
         if ($claudeVersion) { Write-Ok "Claude Code $claudeVersion installed" }
         else {
             Write-Warn "claude is still not on PATH. Open a new terminal and run: claude --version"
@@ -182,7 +204,9 @@ if (Test-Command "git") {
 } else {
     Write-Warn "Git for Windows is not installed. Claude Code falls back to PowerShell without it."
     if (Confirm-Action "Install Git for Windows with winget?") {
-        if (Install-WithWinget "Git.Git" "Git for Windows") { Write-Ok "Git for Windows installed" }
+        Install-WithWinget "Git.Git" "Git for Windows"
+        if (Test-Command "git") { Write-Ok "Git for Windows installed" }
+        else { Write-Warn "git is still not on PATH; open a new terminal and run: git --version" }
     }
 }
 
