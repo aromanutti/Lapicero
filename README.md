@@ -1,8 +1,19 @@
 # Lapicero
 
-Lapicero is a local handwritten-notes app for Windows 10/11. It has no installer, account, cloud sync, or typed text. A mouse works; tablet pen input is supported by Qt, but actual handwriting feel, palm rejection, and device drivers still need a trial on your physical tablet.
+Lapicero is a local handwritten-notes app for Windows 10/11. It has no account, cloud sync, or typed text. A mouse works; tablet pen input is supported by Qt, but actual handwriting feel, palm rejection, and device drivers still need a trial on your physical tablet.
 
-## Set up and run (PowerShell)
+## Install (Windows)
+
+Double-click `install.cmd` (or run `powershell -ExecutionPolicy Bypass -File .\install.ps1`). It checks each dependency and asks before installing anything missing:
+
+- **Python 3.10+** (via winget) and Lapicero's packages in `.venv` (from `requirements.txt`) — required.
+- **Claude Code** — needed only for Ask Claude. Installed with the official native installer (`irm https://claude.ai/install.ps1 | iex`), falling back to `winget install Anthropic.ClaudeCode`. Sign in once afterwards by running `claude`.
+- **Git for Windows** (via winget) — optional; Claude Code uses it for its Bash tool and falls back to PowerShell without it.
+- The Desktop / Start menu shortcuts and the `lapicero` MCP server in Claude Code — optional.
+
+`-CheckOnly` only reports what is installed; `-Yes` answers yes to every question. It exits with 1 while a required piece is missing.
+
+## Set up and run manually (PowerShell)
 
 From this folder, with Python available on your PATH:
 
