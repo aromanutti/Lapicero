@@ -528,11 +528,16 @@ class LapiceroWindow(QMainWindow):
         self.toolbar.set_widgets(entries)
         for item, button in self.toolbar_buttons.items():
             button.setVisible(item in self.toolbar_items)
+        self._show_exit_fullscreen(self.isFullScreen())
         if hasattr(self, "settings_dialog"):
             self.settings_dialog.set_toolbar_items(self.toolbar_items)
         self._place_toolbar()
         if save:
             self._save_ui_settings()
+
+    def _show_exit_fullscreen(self, full):
+        """The header's way out is hidden in fullscreen; skip it if the toolbar already has one."""
+        self.exit_fullscreen_button.setVisible(full and "fullscreen" not in self.toolbar_items)
 
     def toolbar_menu(self):
         menu = QMenu(self)
@@ -652,7 +657,7 @@ class LapiceroWindow(QMainWindow):
         self.page_frame.layout().setContentsMargins(*((0, 0, 0, 0) if full else (1, 1, 1, 1)))
         self.page_frame.setProperty("bare", full)
         self.page_frame.setStyleSheet("QFrame#page { border: 0; border-radius: 0; }" if full else "")
-        self.exit_fullscreen_button.setVisible(full)
+        self._show_exit_fullscreen(full)
         if full:
             self.sidebar.hide()
             self.showFullScreen()

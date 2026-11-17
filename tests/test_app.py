@@ -858,3 +858,20 @@ def test_dragging_a_row_in_settings_reorders_the_toolbar(window, monkeypatch, qt
     assert model.moveRow(model.index(0, 0).parent(), 3, model.index(0, 0).parent(), 0)  # Lasso to the top.
     qt.processEvents()
     assert window.toolbar_items[:2] == ["lasso", "sidebar"]
+
+
+def test_fullscreen_item_is_not_duplicated_in_fullscreen(window, monkeypatch, qt):
+    populate(window, monkeypatch)
+    monkeypatch.setattr(window, "showFullScreen", lambda: None)
+    monkeypatch.setattr(window, "showNormal", lambda: None)
+    monkeypatch.setattr(window, "isFullScreen", lambda: window.header.isHidden())
+    window.set_toolbar_items(["undo", "fullscreen"])
+    window.toggle_fullscreen()
+    assert window.toolbar_buttons["fullscreen"].isVisible()
+    assert not window.exit_fullscreen_button.isVisible()
+    window.set_toolbar_items(["undo"])  # Removed while in fullscreen: the way out comes back.
+    assert window.exit_fullscreen_button.isVisible()
+    window.set_toolbar_items(["undo", "fullscreen"])
+    assert not window.exit_fullscreen_button.isVisible()
+    window.toggle_fullscreen()
+    assert not window.exit_fullscreen_button.isVisible()
