@@ -892,3 +892,104 @@ def test_fullscreen_is_not_a_toolbar_item_and_its_exit_is_always_there(window, m
     window.toggle_fullscreen()
     assert window.exit_fullscreen_button.isVisible()
     assert sum(button.isVisible() for button in window.toolbar.widgets()) == 2
+
+
+def ui_settings(window):
+    return json.loads((window.library.path.parent / "ui.json").read_text(encoding="utf-8"))
+
+
+def test_settings_lists_every_shortcut_with_its_current_key(window):
+    from lapicero import shortcuts
+    from PySide6.QtGui import QKeySequence
+    dialog = window.settings_dialog
+    window.show_settings()
+    dialog.focus_shortcuts()
+    assert dialog.pages.currentIndex() == 1
+    assert set(dialog.shortcut_edits) == set(shortcuts.DEFAULTS)
+    for action, key in shortcuts.DEFAULTS.items():
+        shown = dialog.shortcut_edits[action].keySequence()
+        assert shown.toString(QKeySequence.SequenceFormat.PortableText) == key
+    window.show_settings(toolbar=True)
+    assert dialog.pages.currentIndex() == 0  # Customize toolbar still lands on the toolbar list.
+    dialog.accept()
+
+
+def test_recording_a_new_shortcut_rebinds_saves_and_survives_a_restart(window, monkeypatch, qt, tmp_path):
+    populate(window, monkeypatch)
+    edit = window.settings_dialog.shortcut_edits["eraser"]
+    edit.setFocus()
+    QTest.keyClick(edit, Qt.Key.Key_X)
+    assert window.shortcut_keys["eraser"] == "X"
+    assert window.eraser_button.toolTip() == "Eraser (X)"
+    assert "X Eraser" in window.toolbar.toolTip() and "E Eraser" not in window.toolbar.toolTip()
+    window.canvas.setFocus()
+    qt.processEvents()
+    QTest.keyClick(window.canvas, Qt.Key.Key_E)
+    assert window.canvas.mode == "pen"
+    QTest.keyClick(window.canvas, Qt.Key.Key_X)
+    assert window.canvas.mode == "eraser"
+    assert ui_settings(window)["shortcuts"] == {"eraser": "X"}
+
+    again = LapiceroWindow(library_path=tmp_path / "folder" / "library.json", autosave_delay_ms=0)
+    try:
+        assert again.shortcut_keys["eraser"] == "X" and again.shortcut_keys["lasso"] == "L"
+        assert again.eraser_button.toolTip() == "Eraser (X)"
+    finally:
+        again.library._saved = again.library._data()
+        again.close()
+
+
+def test_window_shortcut_can_be_rebound(window, monkeypatch, qt):
+    _, _, page = populate(window, monkeypatch)
+    window.set_shortcut("undo", "Ctrl+U")
+    assert window.undo_button.toolTip() == "Undo (Ctrl+U)"
+    window.canvas.setFocus()
+    qt.processEvents()
+    tap(window)
+    QTest.keyClick(window.canvas, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert len(page.note.strokes) == 1
+    QTest.keyClick(window.canvas, Qt.Key.Key_U, Qt.KeyboardModifier.ControlModifier)
+    assert not page.note.strokes
+
+
+def test_removing_a_shortcut_leaves_the_action_without_one(window, monkeypatch, qt):
+    populate(window, monkeypatch)
+    dialog = window.settings_dialog
+    dialog.shortcut_remove_buttons["lasso"].click()
+    assert window.shortcut_keys["lasso"] == ""
+    assert dialog.shortcut_edits["lasso"].keySequence().isEmpty()
+    assert not dialog.shortcut_remove_buttons["lasso"].isEnabled()
+    assert window.select_button.toolTip() == "Lasso select: drag to move, Delete to remove"
+    window.canvas.setFocus()
+    qt.processEvents()
+    QTest.keyClick(window.canvas, Qt.Key.Key_L)
+    assert window.canvas.mode == "pen"
+    assert ui_settings(window)["shortcuts"] == {"lasso": ""}
+
+
+def test_a_key_in_use_moves_to_the_new_action_and_reset_restores_defaults(window, monkeypatch, qt):
+    from lapicero import shortcuts
+    populate(window, monkeypatch)
+    saves = []
+    monkeypatch.setattr(window, "save", lambda *args: saves.append(True))
+    dialog = window.settings_dialog
+    edit = dialog.shortcut_edits["eraser"]
+    edit.setFocus()
+    QTest.keyClick(edit, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+    assert window.shortcut_keys["eraser"] == "Ctrl+S" and window.shortcut_keys["save"] == ""
+    assert dialog.shortcut_notice.text() == "Ctrl+S was moved from Save to Eraser."
+    assert dialog.shortcut_edits["save"].keySequence().isEmpty()
+    assert window.shortcut_actions["save"].shortcut().isEmpty()
+    window.canvas.setFocus()
+    qt.processEvents()
+    QTest.keyClick(window.canvas, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+    assert window.canvas.mode == "eraser"
+    assert ui_settings(window)["shortcuts"] == {"eraser": "Ctrl+S", "save": ""}
+
+    dialog.reset_shortcuts_button.click()
+    assert window.shortcut_keys == shortcuts.DEFAULTS
+    assert dialog.shortcut_notice.text() == ""
+    assert ui_settings(window)["shortcuts"] == {}
+    QTest.keyClick(window.canvas, Qt.Key.Key_P)
+    QTest.keyClick(window.canvas, Qt.Key.Key_E)
+    assert window.canvas.mode == "eraser"

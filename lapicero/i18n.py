@@ -34,32 +34,30 @@ SPANISH = {
     "Grid": "Cuadrícula",
     "Plain": "Lisa",
     "Paper of the selected page": "Papel de la página seleccionada",
-    "Fullscreen (F11, Esc to leave)": "Pantalla completa (F11, Esc para salir)",
+    "Fullscreen{key}": "Pantalla completa{key}",
     "Fullscreen": "Pantalla completa",
     "Zoom out": "Alejar",
-    "Reset zoom (Ctrl+0)": "Restablecer zoom (Ctrl+0)",
+    "Reset zoom{key}": "Restablecer zoom{key}",
     "Zoom in": "Acercar",
     "Show/hide sidebar": "Mostrar/ocultar barra lateral",
-    "Undo (Ctrl+Z)": "Deshacer (Ctrl+Z)",
-    "Redo (Ctrl+Y)": "Rehacer (Ctrl+Y)",
-    "Lasso select (L): drag to move, Delete to remove":
-        "Selección con lazo (L): arrastra para mover, Supr para eliminar",
-    "Hand select (H): click an item, or drag a box around several":
-        "Selección con mano (H): haz clic en un elemento o arrastra un recuadro sobre varios",
-    "Eraser (E)": "Borrador (E)",
+    "Undo{key}": "Deshacer{key}",
+    "Redo{key}": "Rehacer{key}",
+    "Lasso select{key}: drag to move, Delete to remove":
+        "Selección con lazo{key}: arrastra para mover, Supr para eliminar",
+    "Hand select{key}: click an item, or drag a box around several":
+        "Selección con mano{key}: haz clic en un elemento o arrastra un recuadro sobre varios",
+    "Eraser{key}": "Borrador{key}",
     "{name}: click again for color and width": "{name}: haz clic otra vez para color y grosor",
-    "Shapes (S): drag to draw": "Formas (S): arrastra para dibujar",
+    "Shapes{key}: drag to draw": "Formas{key}: arrastra para dibujar",
     "Engineering elements: drag to place axes or symbols":
         "Elementos de ingeniería: arrastra para colocar ejes o símbolos",
-    "Ask Claude (A): drag a box around something, then type a question":
-        "Preguntar a Claude (A): enmarca algo con un recuadro y escribe una pregunta",
+    "Ask Claude{key}: drag a box around something, then type a question":
+        "Preguntar a Claude{key}: enmarca algo con un recuadro y escribe una pregunta",
     "Ask": "Preguntar",
-    "Leave fullscreen (F11 or Esc)": "Salir de pantalla completa (F11 o Esc)",
+    "Leave fullscreen{key}": "Salir de pantalla completa{key}",
     "Width (1–{max}):": "Grosor (1–{max}):",
-    "P pen · E eraser · L lasso · H hand · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
-    "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom · F11 fullscreen":
-        "P lápiz · E borrador · L lazo · H mano · S formas · A preguntar a Claude · Ctrl+C/V copiar/pegar · "
-        "Ctrl+↑/↓ grosor · rueda desplazar · Mayús+rueda lateral · Ctrl+rueda zoom · F11 pantalla completa",
+    "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom":
+        "rueda desplazar · Mayús+rueda lateral · Ctrl+rueda zoom",
     # Pens, colors, shapes and diagrams
     "Black pen": "Lápiz negro",
     "Blue pen": "Lápiz azul",
@@ -144,8 +142,8 @@ SPANISH = {
     "Shapes": "Formas",
     "Engineering elements": "Elementos de ingeniería",
     "Paste": "Pegar",
-    "New page (Ctrl+N)": "Nueva página (Ctrl+N)",
-    "Paste (Ctrl+V)": "Pegar (Ctrl+V)",
+    "New page{key}": "Nueva página{key}",
+    "Paste{key}": "Pegar{key}",
     # Ask Claude
     "Claude Code default": "Predeterminado de Claude Code",
     "Default": "Predeterminado",
@@ -195,6 +193,32 @@ SPANISH = {
     "Claude took more than 5 minutes; the question was cancelled.":
         "Claude tardó más de 5 minutos; se canceló la pregunta.",
 }
+
+SPANISH.update({
+    # Keyboard shortcuts (Settings)
+    "General": "General",
+    "Keyboard shortcuts": "Atajos de teclado",
+    "Settings page": "Página de configuración",
+    "Click a shortcut and press the new keys. Remove leaves the action without one; "
+    "a key already in use moves to the new action.":
+        "Haz clic en un atajo y pulsa las teclas nuevas. Quitar deja la acción sin atajo; "
+        "una tecla que ya se usa pasa a la acción nueva.",
+    "On the page (when it has keyboard focus)": "En la página (cuando tiene el foco del teclado)",
+    "Anywhere in the window": "En cualquier parte de la ventana",
+    "Shortcut for {action}": "Atajo para {action}",
+    "Remove": "Quitar",
+    "Leave {action} without a shortcut": "Dejar {action} sin atajo",
+    "Restore default shortcuts": "Restablecer atajos predeterminados",
+    "{key} was moved from {old} to {new}.": "{key} pasó de {old} a {new}.",
+    "Last pen": "Último lápiz",
+    "Thicker pen": "Lápiz más grueso",
+    "Thinner pen": "Lápiz más fino",
+    "Copy": "Copiar",
+    "Import note": "Importar nota",
+    "Save": "Guardar",
+    "Reset zoom": "Restablecer zoom",
+    "Cancel / leave fullscreen": "Cancelar / salir de pantalla completa",
+})
 
 TRANSLATIONS = {"en": {}, "es": SPANISH}
 

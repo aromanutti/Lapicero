@@ -117,6 +117,7 @@ QListWidget#toolbarList {{ background: #FAFAF8; border: 1px solid {BORDER}; bord
     padding: 6px; outline: 0; }}
 QListWidget#toolbarList::item {{ min-height: 30px; border-radius: 8px; padding-left: 4px; color: {INK}; }}
 QListWidget#toolbarList::item:hover {{ background: #F0F0EC; }}
+QScrollArea#shortcutList, QWidget#shortcutRows {{ background: transparent; }}
 QListWidget#toolbarList::item:selected {{ background: #ECECE8; color: {INK}; }}
 
 QFrame#penPanel {{ background: {SURFACE}; border: 1px solid {BORDER}; }}

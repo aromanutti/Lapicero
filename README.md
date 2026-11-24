@@ -62,6 +62,8 @@ Ink, eraser, undo/redo, move and paste changes auto-save about 1.2 seconds after
 
 If saving fails, the app keeps changes in memory, shows a bounded warning and a persistent status message, and offers Save, Discard, or Cancel on close while changes remain. Cancel keeps the window open; Discard explicitly abandons unsaved work. This is local storage, not synchronization or multi-process editing.
 
+These are the default shortcuts. **Settings → Keyboard shortcuts** lists every one with its current key: click a key and press a new combination to change it, **Remove** to leave an action without a shortcut, or **Restore default shortcuts**. A key already used by another action moves to the new one (the dialog says which). Changes apply at once, tooltips follow them, and they are remembered in `ui.json` (only what differs from the defaults). `Delete` on a selection, `Enter` / `Esc` in the Ask prompt and the mouse-wheel gestures are fixed.
+
 | Shortcut | Behavior |
 | --- | --- |
 | `P` / `E` / `L` / `H` / `S` / `A` | Last pen / eraser / lasso / hand select / shapes / Ask Claude, **only with canvas focus** |

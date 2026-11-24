@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import i18n, icons, theme
+from . import shortcuts as keymap
 from .ai_ops import AiOperations
 from .ask import (ASK_EFFORTS, ASK_MODELS, MCP_CONFIG_FILE, AskPanel, AskPrompt, ClaudeAsk,
                   build_message, build_prompt, build_text_prompt, mcp_config)
@@ -62,8 +63,8 @@ TOOLBAR_GROUPS = {item: group for item, _, group in TOOLBAR_ITEMS}
 # A saved toolbar that never knew one gets it beside that item, if that item is shown.
 ADDED_TOOLBAR_ITEMS = (("hand", "lasso"),)
 DEFAULT_TOOLBAR = tuple(item for item, _, group in TOOLBAR_ITEMS if group != "extras")
-SHORTCUTS = ("P pen · E eraser · L lasso · H hand · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
-             "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom · F11 fullscreen")
+# Ends the toolbar's shortcut list: mouse gestures, which are not configurable.
+POINTER_HINTS = "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom"
 
 
 class FloatingToolbar(QFrame):
@@ -163,6 +164,8 @@ class LapiceroWindow(QMainWindow):
 
         # Before any widget: their strings are translated as they are built.
         self.language = i18n.set_language(self._load_ui_settings().get("language", i18n.DEFAULT_LANGUAGE))
+        self.shortcut_keys = keymap.load(self._load_ui_settings().get("shortcuts"))
+        self._key_tips = []  # (widget, tooltip template with {key}, actions, accessible name)
         self.setWindowTitle("Lapicero")
         self.resize(1280, 800)
         theme.apply(self)
@@ -368,8 +371,7 @@ class LapiceroWindow(QMainWindow):
         self.fullscreen_button.setObjectName("headerButton")
         self.fullscreen_button.setIcon(icons.fullscreen_icon())
         self.fullscreen_button.setIconSize(QSize(22, 22))
-        self.fullscreen_button.setToolTip(tr("Fullscreen (F11, Esc to leave)"))
-        self.fullscreen_button.setAccessibleName(tr("Fullscreen"))
+        self._key_tip(self.fullscreen_button, "Fullscreen{key}", "fullscreen", "escape", name=tr("Fullscreen"))
         self.fullscreen_button.setCheckable(True)
         self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
         bar.addWidget(self.fullscreen_button)
@@ -379,7 +381,7 @@ class LapiceroWindow(QMainWindow):
         pill = self.zoom_pill = FloatingToolbar(self.centralWidget(), "zoomPill")
         canvas = self.canvas
         for text, tip, handler in (("−", "Zoom out", lambda: canvas.set_zoom(canvas.zoom / 1.25)),
-                                   ("100%", "Reset zoom (Ctrl+0)", canvas.reset_zoom),
+                                   ("100%", "Reset zoom{key}", canvas.reset_zoom),
                                    ("+", "Zoom in", lambda: canvas.set_zoom(canvas.zoom * 1.25))):
             button = QToolButton()
             button.setText(text)
@@ -389,6 +391,7 @@ class LapiceroWindow(QMainWindow):
             pill.addWidget(button)
             if text == "100%":
                 self.zoom_label = button
+                self._key_tip(button, tip, "reset_zoom")
         canvas.view_changed.connect(self._zoom_changed)
 
     def _zoom_changed(self):
@@ -412,7 +415,6 @@ class LapiceroWindow(QMainWindow):
 
     def _toolbar(self):
         bar = FloatingToolbar(self.centralWidget())
-        bar.setToolTip(tr(SHORTCUTS))
         bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         bar.customContextMenuRequested.connect(
             lambda position: self.toolbar_menu().exec(bar.mapToGlobal(position)))
@@ -424,17 +426,18 @@ class LapiceroWindow(QMainWindow):
         self.sidebar_button = self._tool_button(bar, icons.sidebar_icon(), "Show/hide sidebar", True)
         self.sidebar_button.setChecked(True)
         self.sidebar_button.toggled.connect(self.sidebar.setVisible)
-        self.undo_button = self._tool_button(bar, icons.undo_icon(), "Undo (Ctrl+Z)")
-        self.redo_button = self._tool_button(bar, icons.redo_icon(), "Redo (Ctrl+Y)")
+        self.undo_button = self._key_tip(self._tool_button(bar, icons.undo_icon(), ""), "Undo{key}", "undo")
+        self.redo_button = self._key_tip(self._tool_button(bar, icons.redo_icon(), ""), "Redo{key}", "redo")
         self.undo_button.clicked.connect(self.undo)
         self.redo_button.clicked.connect(self.redo)
         tools = QButtonGroup(self)
         tools.setExclusive(True)
-        self.select_button = self._tool_button(
-            bar, icons.lasso_icon(), "Lasso select (L): drag to move, Delete to remove", True)
-        self.hand_button = self._tool_button(
-            bar, icons.hand_icon(), "Hand select (H): click an item, or drag a box around several", True)
-        self.eraser_button = self._tool_button(bar, icons.eraser_icon(), "Eraser (E)", True)
+        self.select_button = self._key_tip(self._tool_button(bar, icons.lasso_icon(), "", True),
+                                           "Lasso select{key}: drag to move, Delete to remove", "lasso")
+        self.hand_button = self._key_tip(self._tool_button(bar, icons.hand_icon(), "", True),
+                                         "Hand select{key}: click an item, or drag a box around several", "hand")
+        self.eraser_button = self._key_tip(self._tool_button(bar, icons.eraser_icon(), "", True),
+                                           "Eraser{key}", "eraser")
         self.select_button.clicked.connect(lambda: self.canvas.set_mode("select"))
         self.hand_button.clicked.connect(lambda: self.canvas.set_mode("hand"))
         self.eraser_button.clicked.connect(lambda: self.canvas.set_mode("eraser"))
@@ -453,7 +456,8 @@ class LapiceroWindow(QMainWindow):
             tools.addButton(button)
             self.pen_buttons.append(button)
         self.pen_button = self.pen_buttons[0]
-        self.shape_button = self._tool_button(bar, icons.shape_icon("rectangle"), "Shapes (S): drag to draw", True)
+        self.shape_button = self._key_tip(self._tool_button(bar, icons.shape_icon("rectangle"), "", True),
+                                          "Shapes{key}: drag to draw", "shapes")
         self.shape_button.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         menu = QMenu(self.shape_button)
         self.shape_actions = {}
@@ -479,23 +483,28 @@ class LapiceroWindow(QMainWindow):
         self.diagram_button.setMenu(menu)
         self.diagram_button.clicked.connect(lambda: self.choose_diagram(self.diagram_kind))
         tools.addButton(self.diagram_button)
-        self.ask_button = self._tool_button(
-            bar, icons.ask_icon(), "Ask Claude (A): drag a box around something, then type a question", True)
+        self.ask_button = self._key_tip(
+            self._tool_button(bar, icons.ask_icon(), "", True),
+            "Ask Claude{key}: drag a box around something, then type a question", "ask")
         self.ask_button.setObjectName("askButton")
         self.ask_button.setText(tr("Ask"))
         self.ask_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.ask_button.clicked.connect(self._ask_mode)
         tools.addButton(self.ask_button)
         # The header is hidden in fullscreen, so the way out moves onto the toolbar.
-        self.exit_fullscreen_button = self._tool_button(bar, icons.fullscreen_icon(), "Leave fullscreen (F11 or Esc)")
+        self.exit_fullscreen_button = self._key_tip(self._tool_button(bar, icons.fullscreen_icon(), ""),
+                                                    "Leave fullscreen{key}", "fullscreen", "escape")
         self.exit_fullscreen_button.clicked.connect(self.toggle_fullscreen)
         self.exit_fullscreen_button.hide()
         extras = {}
         for item, icon, tip, handler in (
-                ("new_page", icons.new_page_icon(), "New page (Ctrl+N)", "new_page"),
-                ("paste", icons.paste_icon(), "Paste (Ctrl+V)", "paste"),
+                ("new_page", icons.new_page_icon(), "New page{key}", "new_page"),
+                ("paste", icons.paste_icon(), "Paste{key}", "paste"),
                 ("settings", icons.settings_icon(), "Settings", "show_settings")):
-            extras[item] = self._tool_button(bar, icon, tip)
+            keyed = "{key}" in tip
+            extras[item] = self._tool_button(bar, icon, "" if keyed else tip)
+            if keyed:
+                self._key_tip(extras[item], tip, item)
             extras[item].clicked.connect(lambda checked=False, h=handler: getattr(self, h)())
         self.new_page_action.changed.connect(
             lambda: extras["new_page"].setEnabled(self.new_page_action.isEnabled()))
@@ -693,16 +702,67 @@ class LapiceroWindow(QMainWindow):
             self.toggle_fullscreen()
 
     def _shortcuts(self):
-        for text, callback in (("Ctrl+N", self.new_page), ("Ctrl+O", self.import_note),
-                               ("Ctrl+S", self.save), ("Ctrl+Z", self.undo),
-                               ("Ctrl+Y", self.redo), ("F11", self.toggle_fullscreen),
-                               ("Escape", self._escape), ("Ctrl+0", self.canvas.reset_zoom),
-                               ("Ctrl+C", self.copy), ("Ctrl+V", self.paste)):
+        """Window-wide shortcuts are actions; page-only ones are read in eventFilter."""
+        handlers = {"undo": self.undo, "redo": self.redo, "copy": self.copy, "paste": self.paste,
+                    "new_page": self.new_page, "import_note": self.import_note, "save": self.save,
+                    "reset_zoom": self.canvas.reset_zoom, "fullscreen": self.toggle_fullscreen,
+                    "escape": self._escape}
+        assert set(handlers) == {item for item, scope in keymap.SCOPES.items() if scope == keymap.WINDOW}
+        self.shortcut_actions = {}
+        for item, callback in handlers.items():
             action = QAction(self)
-            action.setShortcut(QKeySequence(text))
             action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
             action.triggered.connect(callback)
             self.addAction(action)
+            self.shortcut_actions[item] = action
+        self.settings_dialog.shortcut_changed.connect(self.set_shortcut)
+        self.settings_dialog.shortcuts_reset.connect(self.reset_shortcuts)
+        self._apply_shortcuts()
+
+    def set_shortcut(self, action, key):
+        """Bind action to key ("" removes its shortcut); an action already using key loses it."""
+        self.shortcut_keys, displaced = keymap.assign(self.shortcut_keys, action, key)
+        notice = "" if not displaced else tr(
+            "{key} was moved from {old} to {new}.", key=self.shortcut_keys[action],
+            old=", ".join(tr(keymap.LABELS[item]) for item in displaced), new=tr(keymap.LABELS[action]))
+        self._apply_shortcuts(notice)
+        self._save_ui_settings()
+
+    def reset_shortcuts(self):
+        self.shortcut_keys = dict(keymap.DEFAULTS)
+        self._apply_shortcuts()
+        self._save_ui_settings()
+
+    def _apply_shortcuts(self, notice=""):
+        for item, action in self.shortcut_actions.items():
+            action.setShortcut(QKeySequence(self.shortcut_keys[item], QKeySequence.SequenceFormat.PortableText))
+        self._canvas_keys = keymap.bound(self.shortcut_keys, keymap.CANVAS)
+        for widget, template, actions, name in self._key_tips:
+            self._show_key_tip(widget, template, actions, name)
+        listed = [f"{key} {tr(keymap.LABELS[item])}" for item, key in self.shortcut_keys.items() if key]
+        self.toolbar.setToolTip(" · ".join(listed + [tr(POINTER_HINTS)]))
+        self.settings_dialog.set_shortcuts(self.shortcut_keys, notice)
+
+    def _key_tip(self, widget, template, *actions, name=None):
+        """Give widget a tooltip naming the current shortcut of actions, kept up to date."""
+        self._key_tips.append((widget, template, actions, name))
+        self._show_key_tip(widget, template, actions, name)
+        return widget
+
+    def _show_key_tip(self, widget, template, actions, name):
+        keys = [self.shortcut_keys[item] for item in actions if self.shortcut_keys[item]]
+        text = tr(template, key=f" ({', '.join(keys)})" if keys else "")
+        widget.setToolTip(text)
+        widget.setAccessibleName(name or text)
+
+    def _canvas_shortcut(self, action):
+        if action == "pen":
+            self._use_preset(self.active_preset)
+        elif action in ("width_up", "width_down"):
+            self.width_slider.setValue(self.width_slider.value() + (1 if action == "width_up" else -1))
+        else:
+            {"eraser": self.eraser_button, "lasso": self.select_button, "hand": self.hand_button,
+             "shapes": self.shape_button, "ask": self.ask_button}[action].click()
 
     def _load_ui_settings(self):
         try:
@@ -723,6 +783,8 @@ class LapiceroWindow(QMainWindow):
 
     def _save_ui_settings(self):
         data = {"toolbar_size": self.toolbar_size, "language": self.language}
+        if hasattr(self, "shortcut_keys"):
+            data["shortcuts"] = keymap.changes(self.shortcut_keys)
         if hasattr(self, "toolbar_items"):
             data["toolbar_items"] = self.toolbar_items
             data["toolbar_known"] = list(TOOLBAR_GROUPS)
@@ -781,19 +843,9 @@ class LapiceroWindow(QMainWindow):
                 self._round_view()
             self._place_toolbar()
         if watched is self.canvas and event.type() == QEvent.Type.KeyPress and self.canvas.isEnabled():
-            key, modifiers = event.key(), event.modifiers()
-            if modifiers == Qt.KeyboardModifier.NoModifier:
-                if key == Qt.Key.Key_P:
-                    self._use_preset(self.active_preset)
-                    return True
-                tool = {Qt.Key.Key_E: self.eraser_button, Qt.Key.Key_L: self.select_button,
-                        Qt.Key.Key_H: self.hand_button,
-                        Qt.Key.Key_S: self.shape_button, Qt.Key.Key_A: self.ask_button}.get(key)
-                if tool is not None:
-                    tool.click()
-                    return True
-            if modifiers == Qt.KeyboardModifier.ControlModifier and key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
-                self.width_slider.setValue(self.width_slider.value() + (1 if key == Qt.Key.Key_Up else -1))
+            action = self._canvas_keys.get(keymap.event_text(event))
+            if action is not None:
+                self._canvas_shortcut(action)
                 return True
         return super().eventFilter(watched, event)
 

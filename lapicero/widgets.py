@@ -1,10 +1,12 @@
 """Small reusable widgets for the Graphite UI."""
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QDialog, QFrame, QHBoxLayout, QLabel,
-                               QListWidget, QListWidgetItem, QPushButton, QVBoxLayout)
+from PySide6.QtGui import QIcon, QKeySequence
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QKeySequenceEdit, QLabel, QListWidget, QListWidgetItem, QPushButton,
+                               QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
+from . import shortcuts
 from .i18n import LANGUAGES, tr
 
 
@@ -86,23 +88,37 @@ def _label(text, name):
 
 
 class SettingsDialog(QDialog):
-    """Rarely changed options: language, the toolbar and the defaults for Ask Claude."""
+    """Rarely changed options: language, the toolbar, Ask Claude defaults and keyboard shortcuts."""
 
     toolbar_changed = Signal(list)  # Ids of the items to show, in order.
+    shortcut_changed = Signal(str, str)  # Action id, its new key in portable text ("" removes it).
+    shortcuts_reset = Signal()
 
     def __init__(self, toolbar_sizes, models, efforts, parent=None):
         super().__init__(parent)
         self.setObjectName("settings")
         self.setWindowTitle(tr("Settings"))
         self.setMinimumWidth(880)
+        self._bindings = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 18)
         outer.setSpacing(10)
         outer.addWidget(_label(tr("Settings"), "dialogTitle"))
         outer.addSpacing(6)
-        columns = QHBoxLayout()
+        self.page_choice = SegmentedControl()
+        self.page_choice.addItem(tr("General"), "general")
+        self.page_choice.addItem(tr("Keyboard shortcuts"), "shortcuts")
+        self.page_choice.setToolTip(tr("Settings page"))
+        outer.addWidget(self.page_choice, 0, Qt.AlignmentFlag.AlignLeft)
+        outer.addSpacing(4)
+        self.pages = QStackedWidget()
+        self.page_choice.currentIndexChanged.connect(self.pages.setCurrentIndex)
+        outer.addWidget(self.pages, 1)
+        general = QWidget()
+        self.pages.addWidget(general)
+        columns = QHBoxLayout(general)
+        columns.setContentsMargins(0, 0, 0, 0)
         columns.setSpacing(28)
-        outer.addLayout(columns, 1)
         layout = QVBoxLayout()
         layout.setSpacing(10)
         columns.addLayout(layout, 1)
@@ -172,6 +188,7 @@ class SettingsDialog(QDialog):
         self._default_toolbar = ()
         self._syncing = False
         self._emitted = None
+        self.pages.addWidget(self._shortcuts_page())
         outer.addSpacing(8)
 
         footer = QHBoxLayout()
@@ -182,6 +199,90 @@ class SettingsDialog(QDialog):
         done.clicked.connect(self.accept)
         footer.addWidget(done)
         outer.addLayout(footer)
+
+    def _shortcuts_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        hint = _label(tr("Click a shortcut and press the new keys. Remove leaves the action "
+                         "without one; a key already in use moves to the new action."), "hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        scroll = QScrollArea()
+        scroll.setObjectName("shortcutList")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setMinimumHeight(340)
+        rows = QWidget()
+        rows.setObjectName("shortcutRows")
+        grid = QGridLayout(rows)
+        grid.setContentsMargins(4, 4, 12, 4)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(0, 1)
+        self.shortcut_edits = {}
+        self.shortcut_remove_buttons = {}
+        row, scope = 0, None
+        for action, label, _, action_scope in shortcuts.ACTIONS:
+            if action_scope != scope:
+                scope = action_scope
+                title = (tr("On the page (when it has keyboard focus)") if scope == shortcuts.CANVAS
+                         else tr("Anywhere in the window"))
+                header = _label(title, "fieldLabel")
+                grid.addWidget(header, row, 0, 1, 3)
+                row += 1
+            grid.addWidget(QLabel(tr(label)), row, 0)
+            edit = QKeySequenceEdit()
+            edit.setMaximumSequenceLength(1)
+            edit.setMinimumWidth(170)
+            edit.setToolTip(tr("Shortcut for {action}", action=tr(label)))
+            edit.setAccessibleName(tr("Shortcut for {action}", action=tr(label)))
+            edit.editingFinished.connect(lambda a=action: self._shortcut_edited(a))
+            grid.addWidget(edit, row, 1)
+            remove = QPushButton(tr("Remove"))
+            remove.setObjectName("secondary")
+            remove.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove.setToolTip(tr("Leave {action} without a shortcut", action=tr(label)))
+            remove.clicked.connect(lambda checked=False, a=action: self.shortcut_changed.emit(a, ""))
+            grid.addWidget(remove, row, 2)
+            self.shortcut_edits[action] = edit
+            self.shortcut_remove_buttons[action] = remove
+            row += 1
+        grid.setRowStretch(row, 1)
+        scroll.setWidget(rows)
+        layout.addWidget(scroll, 1)
+        bottom = QHBoxLayout()
+        self.shortcut_notice = _label("", "hint")
+        self.shortcut_notice.setWordWrap(True)
+        bottom.addWidget(self.shortcut_notice, 1)
+        self.reset_shortcuts_button = QPushButton(tr("Restore default shortcuts"))
+        self.reset_shortcuts_button.setObjectName("secondary")
+        self.reset_shortcuts_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reset_shortcuts_button.clicked.connect(self.shortcuts_reset.emit)
+        bottom.addWidget(self.reset_shortcuts_button)
+        layout.addLayout(bottom)
+        return page
+
+    def _shortcut_edited(self, action):
+        edit = self.shortcut_edits[action]
+        key = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        if key and key != self._bindings.get(action):
+            self.shortcut_changed.emit(action, key)
+
+    def set_shortcuts(self, bindings, notice=""):
+        """Show these bindings (action -> portable key text, "" for none)."""
+        self._bindings = dict(bindings)
+        for action, edit in self.shortcut_edits.items():
+            key = bindings.get(action, "")
+            edit.blockSignals(True)
+            edit.setKeySequence(QKeySequence(key, QKeySequence.SequenceFormat.PortableText))
+            edit.blockSignals(False)
+            self.shortcut_remove_buttons[action].setEnabled(bool(key))
+        self.shortcut_notice.setText(notice)
+
+    def focus_shortcuts(self):
+        self.page_choice.setCurrentIndex(self.page_choice.findData("shortcuts"))
 
     def set_toolbar_choices(self, choices, defaults):
         """choices: (id, icon, label) for every item the toolbar can show."""
@@ -230,6 +331,7 @@ class SettingsDialog(QDialog):
         self._emit_toolbar()
 
     def focus_toolbar(self):
+        self.page_choice.setCurrentIndex(self.page_choice.findData("general"))
         self.toolbar_list.setFocus()
         if self.toolbar_list.currentRow() < 0 and self.toolbar_list.count():
             self.toolbar_list.setCurrentRow(0)
