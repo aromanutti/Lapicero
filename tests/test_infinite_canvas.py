@@ -140,6 +140,53 @@ def test_lasso_outside_selection_clears_it(canvas):
     assert canvas.selection == []
 
 
+def test_hand_click_selects_one_item_and_click_drag_moves_it_as_one_undo(canvas):
+    first = Stroke(((50, 50), (60, 60)))
+    second = Stroke(((52, 58), (62, 48)))
+    canvas.set_note(Note(strokes=[first, second]))
+    emitted = []
+    canvas.changed.connect(lambda: emitted.append(1))
+    canvas.set_mode("hand")
+    assert canvas.cursor().shape() == Qt.CursorShape.PointingHandCursor
+    drag(canvas, (55, 55))
+    assert canvas.selection == [second] and emitted == []  # Topmost item under the click.
+    drag(canvas, (200, 200))
+    assert canvas.selection == []
+    drag(canvas, (50, 50), (70, 60), (100, 70))  # Press on an unselected item and drag it away.
+    assert canvas.note.strokes[0].points == ((100, 70), (110, 80))
+    assert canvas.note.strokes[1] is second and emitted == [1]
+    assert canvas.selection == [canvas.note.strokes[0]] and canvas.mode == "hand"
+    assert canvas.undo() and canvas.note.strokes == [first, second]
+
+
+def test_hand_drag_on_empty_space_selects_everything_mostly_inside_the_box(canvas, tmp_path):
+    inside = Stroke(((50, 50), (60, 60)))
+    straddling = Stroke(((90, 90), (200, 200), (210, 210)))
+    outside = Stroke(((300, 300), (310, 310)))
+    canvas.set_note(Note(strokes=[inside, straddling, outside]))
+    canvas.set_mode("hand")
+    mouse(canvas, "press", 30, 30)
+    mouse(canvas, "move", 120, 120)
+    assert canvas._band == ((30, 30), (120, 120))  # The box is drawn while dragging.
+    mouse(canvas, "release", 120, 120)
+    assert canvas.selection == [inside] and canvas._band is None
+    drag(canvas, (55, 55), (75, 65), (105, 75))  # Dragging inside the frame moves the selection.
+    assert canvas.note.strokes[0].points == ((100, 70), (110, 80))
+
+
+def test_switching_between_hand_and_lasso_keeps_the_selection(canvas):
+    stroke = Stroke(((50, 50), (60, 60)))
+    canvas.set_note(Note(strokes=[stroke]))
+    canvas.set_mode("hand")
+    drag(canvas, (55, 55))
+    canvas.set_mode("select")
+    assert canvas.selection == [stroke] and canvas.cursor().shape() == Qt.CursorShape.ArrowCursor
+    canvas.set_mode("hand")
+    assert canvas.selection == [stroke]
+    canvas.set_mode("pen")
+    assert canvas.selection == []
+
+
 @pytest.mark.parametrize("kind", InkCanvas.SHAPES)
 def test_shape_tool_drag_commits_one_stroke(canvas, kind):
     canvas.set_mode("shape")

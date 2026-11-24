@@ -50,15 +50,19 @@ AUTOSAVE_DELAY_MS = 1200
 # Every item the toolbar can show: (id, label, group). Separators fall between groups.
 TOOLBAR_ITEMS = (("sidebar", "Show/hide sidebar", "view"),
                  ("undo", "Undo", "history"), ("redo", "Redo", "history"),
-                 ("lasso", "Lasso select", "tools"), ("eraser", "Eraser", "tools"),
+                 ("lasso", "Lasso select", "tools"), ("hand", "Hand select", "tools"),
+                 ("eraser", "Eraser", "tools"),
                  *((name.lower().replace(" ", "_"), name, "tools") for name, *_ in PEN_PRESETS),
                  ("shapes", "Shapes", "tools"), ("engineering", "Engineering elements", "insert"),
                  ("ask", "Ask Claude", "ai"),
                  ("new_page", "New page", "extras"), ("paste", "Paste", "extras"),
                  ("settings", "Settings", "extras"))
 TOOLBAR_GROUPS = {item: group for item, _, group in TOOLBAR_ITEMS}
+# Items added after toolbars could be saved, with the item they first appear after.
+# A saved toolbar that never knew one gets it beside that item, if that item is shown.
+ADDED_TOOLBAR_ITEMS = (("hand", "lasso"),)
 DEFAULT_TOOLBAR = tuple(item for item, _, group in TOOLBAR_ITEMS if group != "extras")
-SHORTCUTS = ("P pen · E eraser · L lasso · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
+SHORTCUTS = ("P pen · E eraser · L lasso · H hand · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
              "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom · F11 fullscreen")
 
 
@@ -428,10 +432,14 @@ class LapiceroWindow(QMainWindow):
         tools.setExclusive(True)
         self.select_button = self._tool_button(
             bar, icons.lasso_icon(), "Lasso select (L): drag to move, Delete to remove", True)
+        self.hand_button = self._tool_button(
+            bar, icons.hand_icon(), "Hand select (H): click an item, or drag a box around several", True)
         self.eraser_button = self._tool_button(bar, icons.eraser_icon(), "Eraser (E)", True)
         self.select_button.clicked.connect(lambda: self.canvas.set_mode("select"))
+        self.hand_button.clicked.connect(lambda: self.canvas.set_mode("hand"))
         self.eraser_button.clicked.connect(lambda: self.canvas.set_mode("eraser"))
         tools.addButton(self.select_button)
+        tools.addButton(self.hand_button)
         tools.addButton(self.eraser_button)
         self.presets = [PenPreset(*preset) for preset in PEN_PRESETS]
         self.pen_buttons = []
@@ -491,17 +499,31 @@ class LapiceroWindow(QMainWindow):
             extras[item].clicked.connect(lambda checked=False, h=handler: getattr(self, h)())
         self.new_page_action.changed.connect(
             lambda: extras["new_page"].setEnabled(self.new_page_action.isEnabled()))
-        pens = [item for item, _, _ in TOOLBAR_ITEMS[5:5 + len(self.pen_buttons)]]
+        pens = [item for item, _, _ in TOOLBAR_ITEMS[6:6 + len(self.pen_buttons)]]
         self.toolbar_buttons = {
             "sidebar": self.sidebar_button, "undo": self.undo_button, "redo": self.redo_button,
-            "lasso": self.select_button, "eraser": self.eraser_button,
+            "lasso": self.select_button, "hand": self.hand_button, "eraser": self.eraser_button,
             **dict(zip(pens, self.pen_buttons)),
             "shapes": self.shape_button, "engineering": self.diagram_button, "ask": self.ask_button,
             **extras}
         assert list(self.toolbar_buttons) == [item for item, _, _ in TOOLBAR_ITEMS]
         self._pen_panel()
         self._use_preset(self.presets[0])
-        self.set_toolbar_items(self._load_ui_settings().get("toolbar_items", list(DEFAULT_TOOLBAR)), save=False)
+        self.set_toolbar_items(self._saved_toolbar_items(self._load_ui_settings()), save=False)
+
+    @staticmethod
+    def _saved_toolbar_items(data):
+        items = data.get("toolbar_items", list(DEFAULT_TOOLBAR))
+        if not isinstance(items, list):
+            return items
+        known = data.get("toolbar_known")
+        if not isinstance(known, list):  # Saved before this list existed.
+            known = [item for item in TOOLBAR_GROUPS if item not in dict(ADDED_TOOLBAR_ITEMS)]
+        items = list(items)
+        for item, neighbor in ADDED_TOOLBAR_ITEMS:
+            if item not in known and item not in items and neighbor in items:
+                items.insert(items.index(neighbor) + 1, item)
+        return items
 
     @staticmethod
     def _clean_toolbar_items(items):
@@ -703,6 +725,7 @@ class LapiceroWindow(QMainWindow):
         data = {"toolbar_size": self.toolbar_size, "language": self.language}
         if hasattr(self, "toolbar_items"):
             data["toolbar_items"] = self.toolbar_items
+            data["toolbar_known"] = list(TOOLBAR_GROUPS)
         if hasattr(self, "settings_dialog"):
             # Saved for the next start; this window keeps the language it was built in.
             data["language"] = self.settings_dialog.language_choice.currentData()
@@ -764,6 +787,7 @@ class LapiceroWindow(QMainWindow):
                     self._use_preset(self.active_preset)
                     return True
                 tool = {Qt.Key.Key_E: self.eraser_button, Qt.Key.Key_L: self.select_button,
+                        Qt.Key.Key_H: self.hand_button,
                         Qt.Key.Key_S: self.shape_button, Qt.Key.Key_A: self.ask_button}.get(key)
                 if tool is not None:
                     tool.click()

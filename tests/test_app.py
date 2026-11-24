@@ -259,6 +259,9 @@ def test_shortcuts_focus_and_controls(window, monkeypatch, qt, tmp_path):
     assert window.canvas.mode == "pen"
     QTest.keyClick(window.canvas, Qt.Key.Key_L)
     assert window.canvas.mode == "select" and window.select_button.isChecked()
+    QTest.keyClick(window.canvas, Qt.Key.Key_H)
+    assert window.canvas.mode == "hand" and window.hand_button.isChecked()
+    assert not window.select_button.isChecked()
     QTest.keyClick(window.canvas, Qt.Key.Key_S)
     assert window.canvas.mode == "shape" and window.shape_button.isChecked()
     QTest.keyClick(window.canvas, Qt.Key.Key_P)
@@ -539,7 +542,7 @@ def test_floating_compact_toolbar_and_no_status_bar(window, monkeypatch, qt):
     qt.processEvents()
     assert window.findChild(QStatusBar) is None and window.findChild(QToolBar) is None
     bar, view = window.toolbar, view_rect(window)
-    assert bar.isVisible() and bar.width() < view.width() * 0.75
+    assert bar.isVisible() and bar.width() < view.width() * 0.8
     assert abs(bar.geometry().center().x() - view.center().x()) <= 1
     assert view.top() <= bar.y() <= view.top() + 12
     assert window.status.text() == "Saved" and not bar.isAncestorOf(window.status)
@@ -796,6 +799,24 @@ def test_toolbar_reset_restores_the_defaults(window, monkeypatch):
     assert window.settings_dialog.toolbar_items() == ["ask", "undo"]
     window.settings_dialog.reset_button.click()
     assert toolbar_row(window) == list(DEFAULT_TOOLBAR)
+
+
+def test_a_toolbar_saved_before_the_hand_tool_shows_it_beside_the_lasso_once(qt, tmp_path):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    old = ["undo", "lasso", "eraser", "ask"]
+    (folder / "ui.json").write_text(json.dumps({"toolbar_items": old}), encoding="utf-8")
+    window = LapiceroWindow(library_path=folder / "library.json")
+    try:
+        assert window.toolbar_items == ["undo", "lasso", "hand", "eraser", "ask"]
+        window.set_toolbar_items(["undo", "lasso", "ask"])  # Removing it afterwards sticks.
+    finally:
+        window.close()
+    window = LapiceroWindow(library_path=folder / "library.json")
+    try:
+        assert window.toolbar_items == ["undo", "lasso", "ask"]
+    finally:
+        window.close()
 
 
 def test_saved_toolbar_ignores_unknown_and_duplicate_items(qt, tmp_path):

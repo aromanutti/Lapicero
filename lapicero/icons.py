@@ -82,6 +82,28 @@ def lasso_icon():
     return _canvas(paint)
 
 
+def hand_icon():
+    """Pointing hand: index finger up, the other fingers folded into the palm."""
+    def paint(p):
+        _outline(p, 1.6)
+        path = QPainterPath(QPointF(12, 17))
+        path.lineTo(QPointF(12, 6.5))
+        path.cubicTo(QPointF(12, 4), QPointF(16, 4), QPointF(16, 6.5))
+        path.lineTo(QPointF(16, 15))
+        path.cubicTo(QPointF(16, 12.5), QPointF(19.5, 12.5), QPointF(19.5, 15))
+        path.cubicTo(QPointF(19.5, 12.8), QPointF(23, 12.8), QPointF(23, 15.5))
+        path.cubicTo(QPointF(23, 13.5), QPointF(26.5, 13.5), QPointF(26.5, 16))
+        path.lineTo(QPointF(26.5, 21))
+        path.cubicTo(QPointF(26.5, 25.5), QPointF(24, 28), QPointF(20, 28))
+        path.lineTo(QPointF(17, 28))
+        path.cubicTo(QPointF(14.5, 28), QPointF(13, 27), QPointF(11.5, 25))
+        path.lineTo(QPointF(7.5, 19.5))
+        path.cubicTo(QPointF(6.3, 17.8), QPointF(8.5, 15.8), QPointF(10.2, 17.3))
+        path.closeSubpath()
+        p.drawPath(path)
+    return _canvas(paint)
+
+
 def shape_icon(kind):
     def paint(p):
         _outline(p, 1.8)

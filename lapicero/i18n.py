@@ -44,6 +44,8 @@ SPANISH = {
     "Redo (Ctrl+Y)": "Rehacer (Ctrl+Y)",
     "Lasso select (L): drag to move, Delete to remove":
         "Selección con lazo (L): arrastra para mover, Supr para eliminar",
+    "Hand select (H): click an item, or drag a box around several":
+        "Selección con mano (H): haz clic en un elemento o arrastra un recuadro sobre varios",
     "Eraser (E)": "Borrador (E)",
     "{name}: click again for color and width": "{name}: haz clic otra vez para color y grosor",
     "Shapes (S): drag to draw": "Formas (S): arrastra para dibujar",
@@ -54,9 +56,9 @@ SPANISH = {
     "Ask": "Preguntar",
     "Leave fullscreen (F11 or Esc)": "Salir de pantalla completa (F11 o Esc)",
     "Width (1–{max}):": "Grosor (1–{max}):",
-    "P pen · E eraser · L lasso · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
+    "P pen · E eraser · L lasso · H hand · S shapes · A ask Claude · Ctrl+C/V copy/paste · Ctrl+↑/↓ width · "
     "wheel scroll · Shift+wheel sideways · Ctrl+wheel zoom · F11 fullscreen":
-        "P lápiz · E borrador · L lazo · S formas · A preguntar a Claude · Ctrl+C/V copiar/pegar · "
+        "P lápiz · E borrador · L lazo · H mano · S formas · A preguntar a Claude · Ctrl+C/V copiar/pegar · "
         "Ctrl+↑/↓ grosor · rueda desplazar · Mayús+rueda lateral · Ctrl+rueda zoom · F11 pantalla completa",
     # Pens, colors, shapes and diagrams
     "Black pen": "Lápiz negro",
@@ -137,6 +139,7 @@ SPANISH = {
     "Undo": "Deshacer",
     "Redo": "Rehacer",
     "Lasso select": "Selección con lazo",
+    "Hand select": "Selección con mano",
     "Eraser": "Borrador",
     "Shapes": "Formas",
     "Engineering elements": "Elementos de ingeniería",

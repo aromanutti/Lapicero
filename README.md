@@ -42,6 +42,7 @@ A compact toolbar floats over the top center of the page, like OneNote's, so the
 
 - **Sidebar** toggle, **Undo** / **Redo**.
 - **Lasso select**: draw a free loop around ink; strokes mostly inside are selected (tap a stroke, shape or picture to select just it). Selected ink gets a gray halo inside a dashed frame with eight handles and a rotate handle, like OneNote: drag inside to move; drag a side handle to stretch one direction; drag a corner to deform freely (Shift keeps proportions; pictures always keep them); drag the round handle above to rotate (Shift snaps to 15°). Each change is one undo step. Dragging a selection (or a lasso) to an edge of the view scrolls the page that way, faster the closer you get, so you can carry it anywhere in one move. Delete removes the selection; Ctrl+C / Ctrl+V copy and paste it (also into another page); Esc clears it.
+- **Hand select** (`H`): a pointing-hand pointer for picking items one by one, beside the lasso. Click a stroke, shape, letter stroke or picture to select just it (the topmost one under the pointer); press on one and drag to move it at once. Press on empty space and drag to draw a box: everything mostly inside it is selected (strokes with most of their points inside, pictures whose center is inside). A click on empty space clears the selection. The selection then works exactly as with the lasso (handles, rotate, Delete, Ctrl+C / Ctrl+V), and switching between the two tools keeps it. A handwritten letter is usually several strokes, so a click picks one stroke; drag a box to take a whole word.
 - **Eraser**: removes whole strokes; each drag is one undo step. A tablet pen's eraser end erases with any tool.
 - **Pens**: four pens and two highlighters (translucent). Click the active pen again (or right-click any pen) to change its color (10 swatches) and width (1–40). Each pen keeps its own settings for the session. With a tablet pen, the four pens follow pen pressure: a light touch draws thinner and a firm press slightly bolder than the chosen width (mouse ink, highlighters and shapes keep an even width).
 - **Pointer**: with a pen or shape tool the pointer is a see-through dot in the ink color, about as wide as the ink (it follows zoom); the eraser shows a ring the size of what it erases. There is no crosshair.
@@ -63,7 +64,7 @@ If saving fails, the app keeps changes in memory, shows a bounded warning and a 
 
 | Shortcut | Behavior |
 | --- | --- |
-| `P` / `E` / `L` / `S` / `A` | Last pen / eraser / lasso / shapes / Ask Claude, **only with canvas focus** |
+| `P` / `E` / `L` / `H` / `S` / `A` | Last pen / eraser / lasso / hand select / shapes / Ask Claude, **only with canvas focus** |
 | `Ctrl+Up` / `Ctrl+Down` | Increase / decrease the active pen width by one (clamped 1–40), **only with canvas focus** |
 | `Delete` / `Esc` | Delete / clear the lasso selection |
 | `Ctrl+C` / `Ctrl+V` | Copy the lasso selection / paste it, or paste a clipboard picture or copied image file (selected, one undo step); works across pages |

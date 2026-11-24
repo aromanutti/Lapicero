@@ -265,7 +265,7 @@ class InkCanvas(QWidget):
     GRID = 24
     MIN_ZOOM, MAX_ZOOM = .25, 4.0
     WHEEL_STEP = 60
-    MODES = ("pen", "eraser", "select", "shape", "ask")
+    MODES = ("pen", "eraser", "select", "hand", "shape", "ask")
     MIN_ASK_SIDE = 8.0  # Smallest ask rectangle side, in screen pixels.
     SHAPES = SHAPE_KINDS
     DIAGRAMS = DIAGRAM_KINDS  # Engineering elements: drawn like shapes, as several strokes.
@@ -303,6 +303,7 @@ class InkCanvas(QWidget):
         self._last_erase = None
         self._erase_changed = False
         self._lasso = None
+        self._band = None  # Hand tool: (start, end) of the selection box being dragged.
         self._move_from = None
         self._shape_start = None
         self._shape_end = None
@@ -365,12 +366,14 @@ class InkCanvas(QWidget):
             raise ValueError("Unknown tool")
         self.finalize_current_gesture()
         self.mode = mode
-        if mode not in ("select", "shape"):
+        if mode not in ("select", "hand", "shape"):
             self.clear_selection()
         self._apply_cursor()
 
     def _apply_cursor(self):
-        if self.mode in ("select", "ask"):
+        if self.mode == "hand":
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        elif self.mode in ("select", "ask"):
             self.setCursor(Qt.CursorShape.ArrowCursor)
         elif self.mode == "eraser":
             self.setCursor(tip_cursor(None, self.ERASER_RADIUS * 2 * self.zoom, ring=True))
@@ -906,6 +909,7 @@ class InkCanvas(QWidget):
         self._source = None
         self._last_erase = None
         self._lasso = None
+        self._band = None
         self._move_from = None
         self._handle = None
         self._drag_point = None
@@ -963,6 +967,9 @@ class InkCanvas(QWidget):
         self._gesture = "eraser" if eraser_tip else self.mode
         self.gesture_changed.emit(True)
         point = self.to_document(position)
+        hand = self._gesture == "hand"
+        if hand:
+            self._gesture = "select"  # Same moves and handles as the lasso; only picking differs.
         if self._gesture == "shape" and self.selection and (
                 self._handle_at(point) is not None or self._frame().contains(QPointF(*point))):
             self._gesture = "select"  # Like OneNote: a just-drawn shape is grabbed, not redrawn.
@@ -976,6 +983,13 @@ class InkCanvas(QWidget):
                 self._begin_drag(point, handle)
             elif self.selection and self._frame().contains(QPointF(*point)):
                 self._begin_drag(point, None)
+            elif hand and (item := self._item_at(*point)) is not None:
+                self.selection = [item]  # Like a pointer: press on an item to grab and move it.
+                self._begin_drag(point, None)
+                self.update()
+            elif hand:
+                self.clear_selection()
+                self._band = (point, point)
             else:
                 self.clear_selection()
                 self._lasso = [point]
@@ -1005,6 +1019,9 @@ class InkCanvas(QWidget):
             elif self._lasso is not None:
                 self._lasso.append(point)
                 self.update()
+            elif self._band is not None:
+                self._band = (self._band[0], point)
+                self.update()
             if not edge:
                 self._edge_follow(position)
         elif self._gesture in ("shape", "ask"):
@@ -1028,6 +1045,9 @@ class InkCanvas(QWidget):
             if self._lasso is not None:
                 self._lasso.append(point)
                 self._select_in(self._lasso)
+            elif self._band is not None:
+                (x0, y0), (x1, y1) = self._band[0], point
+                self._select_in([(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)])
             elif self._move_from is not None:
                 self._drag_point = point
         elif self._gesture == "ask":
@@ -1057,16 +1077,8 @@ class InkCanvas(QWidget):
         A tap (a loop that never left its start) selects the topmost item under it.
         """
         if all(math.dist(lasso[0], p) <= 3 / self.zoom for p in lasso):
-            x, y = lasso[0]
-            for stroke in reversed(self.note.strokes):
-                if self._hits_rendered(stroke, x, y, 3 / self.zoom):
-                    self.selection = [stroke]
-                    return
-            for image in reversed(self.note.images):
-                if self._image_contains(image, x, y):
-                    self.selection = [image]
-                    return
-            self.selection = []
+            item = self._item_at(*lasso[0])
+            self.selection = [] if item is None else [item]
             return
         polygon = QPolygonF([QPointF(*p) for p in lasso])
         def inside(stroke):
@@ -1075,6 +1087,16 @@ class InkCanvas(QWidget):
         self.selection = [stroke for stroke in self.note.strokes if inside(stroke)] + [
             image for image in self.note.images
             if polygon.containsPoint(self._item_rect(image).center(), Qt.FillRule.OddEvenFill)]
+
+    def _item_at(self, x, y):
+        """The topmost stroke under the point, else the topmost picture, else None."""
+        for stroke in reversed(self.note.strokes):
+            if self._hits_rendered(stroke, x, y, 3 / self.zoom):
+                return stroke
+        for image in reversed(self.note.images):
+            if self._image_contains(image, x, y):
+                return image
+        return None
 
     def _hold_end(self):
         if self._points is not None and self._gesture == "pen":
@@ -1479,6 +1501,12 @@ class InkCanvas(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(dash)
             painter.drawPolyline(QPolygonF([QPointF(*p) for p in self._lasso]))
+        if self._band is not None:
+            dash = QPen(QColor(SELECTION_COLOR), 1, Qt.PenStyle.DashLine)
+            dash.setCosmetic(True)
+            painter.setPen(dash)
+            painter.setBrush(QColor(47, 79, 216, 18))
+            painter.drawRect(QRectF(QPointF(*self._band[0]), QPointF(*self._band[1])).normalized())
 
     def render_region(self, rect, scale=1.0):
         """Paint paper, pictures and ink inside a document rectangle into a new image.
@@ -1521,7 +1549,7 @@ class InkCanvas(QWidget):
 
     def _hover(self, position):
         """Show resize/rotate/move cursors over a selection, like OneNote."""
-        if self.mode not in ("select", "shape") or self._gesture is not None:
+        if self.mode not in ("select", "hand", "shape") or self._gesture is not None:
             return
         point = self.to_document(position)
         handle = self._handle_at(point)
