@@ -245,8 +245,18 @@ def _ellipse(points):
     return kind, tuple(clean)
 
 
-def normalize_shape(points):
-    """Return (kind, clean points), or None when ink should remain untouched."""
+def normalize_shape(points, zoom=1.0):
+    """Return (kind, clean points), or None when ink should remain untouched.
+
+    Size limits are screen pixels: ``zoom`` (screen pixels per page unit) maps
+    the ink to the screen for recognition, and the clean shape back to the page,
+    so a box that looks big enough snaps the same at any zoom.
+    """
+    if zoom != 1.0:
+        result = normalize_shape([(x * zoom, y * zoom) for x, y in points])
+        if result is None:
+            return None
+        return result[0], tuple((x / zoom, y / zoom) for x, y in result[1])
     points = tuple(tuple(p) for p in points)
     if len(points) < 8:
         return None

@@ -96,6 +96,26 @@ def test_doubled_circle_is_not_single_outline():
     assert normalize_shape(points) is None
 
 
+def test_size_limits_follow_zoom_so_a_short_box_snaps_when_zoomed_in():
+    # 120 x 43 page units: below the 45-unit minimum at 100%, but 80 px tall on screen at 187%.
+    corners = [(10, 10), (130, 10), (130, 53), (10, 53), (10, 10)]
+    points = trace(corners)
+    assert normalize_shape(points) is None
+    kind, clean = normalize_shape(points, zoom=1.87)
+    assert kind == "rectangle"
+    # Same result as recognizing the on-screen stroke, mapped back to page units.
+    on_screen = normalize_shape([(x * 1.87, y * 1.87) for x, y in points])[1]
+    assert [c for p in clean for c in p] == pytest.approx([c / 1.87 for p in on_screen for c in p])
+    for want in corners[:-1]:
+        assert min(math.dist(got, want) for got in clean) < 5
+
+
+def test_size_limits_follow_zoom_so_a_tiny_scrawl_is_kept_when_zoomed_out():
+    points = trace([(10, 10), (130, 10), (130, 90), (10, 90), (10, 10)])
+    assert normalize_shape(points)[0] == "rectangle"
+    assert normalize_shape(points, zoom=.3) is None
+
+
 def test_mid_edge_start_still_recognizes_rectangle():
     points = trace([(100, 20), (180, 20), (180, 100), (20, 100), (20, 20), (100, 20)])
     assert normalize_shape(points)[0] == "rectangle"

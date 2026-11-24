@@ -1078,7 +1078,7 @@ class InkCanvas(QWidget):
 
     def _hold_end(self):
         if self._points is not None and self._gesture == "pen":
-            result = normalize_shape(self._points)
+            result = normalize_shape(self._points, self.zoom)
             if result is not None:
                 self._snapped = result[1]
                 # Keep holding to edit: the shape now follows the pen instead of new ink.
